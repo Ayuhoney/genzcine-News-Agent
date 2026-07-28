@@ -1,0 +1,8 @@
+# Container rebuild aur restart karo
+docker compose build && docker compose up
+
+ngrok http 7880
+
+
+Done. npm run build / docker compose build karne pe production build mein koi bhi console.log,
+ console.warn, console.error browser console mein nahi aayega. Development (npm run dev) mein sab pehle jaisa rahega.

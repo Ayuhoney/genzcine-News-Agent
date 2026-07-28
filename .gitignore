@@ -1,0 +1,10 @@
+venv/
+inference/llama/models/
+
+# Python cache artifacts
+**/__pycache__/
+*.pyc
+
+# # Local dev overrides (not for production)
+# docker-compose.override.yml
+# .env
