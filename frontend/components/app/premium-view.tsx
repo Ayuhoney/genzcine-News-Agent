@@ -70,14 +70,14 @@ export function PremiumView({ trainedSeconds = 0, onRetry }: PremiumViewProps) {
         <p className="mb-2 text-[14px] leading-relaxed text-white/40">
           Your 5-minute free trial has ended.
           <br />
-          Unlock unlimited training with NOVA.
+          Unlock unlimited live news with NOVA.
         </p>
 
         {/* Session stat */}
         {trainedSeconds > 0 && (
           <div className="mt-4 mb-6 rounded-2xl border border-white/[0.06] bg-white/[0.03] px-6 py-3">
             <p className="font-mono text-[10px] tracking-[0.2em] text-white/25 uppercase">
-              Session trained
+              Session watched
             </p>
             <p className="mt-0.5 text-xl font-bold text-white/70">{fmt(trainedSeconds)}</p>
           </div>
@@ -86,11 +86,11 @@ export function PremiumView({ trainedSeconds = 0, onRetry }: PremiumViewProps) {
         {/* Premium features */}
         <div className="mt-2 mb-8 w-full space-y-2.5 text-left">
           {[
-            'Unlimited daily training sessions',
-            'All 10 ramp walk lessons unlocked',
-            'Group sessions — train with friends',
-            'Posture AI analysis every session',
-            'Priority access to GenzCine auditions',
+            'Unlimited daily live sessions',
+            'Breaking news alerts, first',
+            'Group sessions — watch with friends',
+            'Real video clips for every story',
+            'Priority access to GenzCine exclusives',
           ].map((feat) => (
             <div key={feat} className="flex items-center gap-3">
               <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-red-600/20">

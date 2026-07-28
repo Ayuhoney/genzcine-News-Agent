@@ -88,6 +88,10 @@ class Config:
     tts_bind_port: int = 8880
     manage_tts: bool = True
 
+    # --- News -------------------------------------------------------------
+    newsdata_api_key: str = ""
+    youtube_api_key: str = ""
+
     # --- Simli ----------------------------------------------------------
     simli_api_key: str = ""
     simli_face_id: str = "b9e5fba3-071a-4e35-896e-211c4d6eaa7b"
@@ -163,6 +167,9 @@ class Config:
             tts_bind_port=int(os.getenv("TTS_BIND_PORT", str(cls.tts_bind_port))),
             manage_tts=_env_bool("MANAGE_TTS", _is_loopback(tts_base_url)),
             #
+            newsdata_api_key=os.getenv("NEWSDATA_API_KEY", cls.newsdata_api_key),
+            youtube_api_key=os.getenv("YOUTUBE_API_KEY", cls.youtube_api_key),
+            #
             simli_api_key=os.getenv("SIMLI_API_KEY", cls.simli_api_key),
             simli_face_id=os.getenv("SIMLI_FACE_ID", cls.simli_face_id),
             simli_livekit_url=os.getenv("SIMLI_LIVEKIT_URL", cls.simli_livekit_url),
@@ -191,6 +198,9 @@ class Config:
             "TTS_BASE_URL": self.tts_base_url,
             "TTS_VOICE": self.tts_voice,
             "TTS_API_KEY": self.tts_api_key,
+            # News
+            "NEWSDATA_API_KEY": self.newsdata_api_key,
+            "YOUTUBE_API_KEY": self.youtube_api_key,
             # Simli
             "SIMLI_API_KEY": self.simli_api_key,
             "SIMLI_FACE_ID": self.simli_face_id,

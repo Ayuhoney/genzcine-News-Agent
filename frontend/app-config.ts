@@ -21,8 +21,8 @@ export interface AppConfig {
 
 export const APP_CONFIG_DEFAULTS: AppConfig = {
   companyName: 'GenzCine',
-  pageTitle: 'NOVA · GenzCine AI Trainer',
-  pageDescription: 'Your AI-powered ramp walk trainer by GenzCine',
+  pageTitle: 'NOVA · GenzCine AI News Anchor',
+  pageDescription: 'Your AI-powered live news anchor by GenzCine',
 
   supportsChatInput: false,
   supportsVideoInput: false,
@@ -33,7 +33,7 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
   accent: '#E63946',
   logoDark: '',
   accentDark: '#E63946',
-  startButtonText: 'Start Training',
+  startButtonText: 'Go Live',
 
   // for LiveKit Cloud Sandbox
   sandboxId: undefined,

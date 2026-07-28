@@ -29,13 +29,7 @@ export const ChatEntry = ({
       className={cn('flex w-full', isLocal ? 'justify-end' : 'justify-start', className)}
       {...props}
     >
-      <div className={cn('flex max-w-[82%] flex-col gap-1', isLocal ? 'items-end' : 'items-start')}>
-        {/* Sender label */}
-        <span className="px-1 font-mono text-[9px] tracking-[0.14em] text-white/20 uppercase">
-          {isLocal ? 'You' : 'Nova'}
-        </span>
-
-        {/* Bubble */}
+      <div className={cn('flex max-w-[82%] flex-col', isLocal ? 'items-end' : 'items-start')}>
         <div
           className={cn(
             'rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed',

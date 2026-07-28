@@ -117,7 +117,112 @@
   * {
     @apply border-foreground/10 outline-ring/50;
   }
+  html {
+    background: transparent !important;
+    /* Avoid dark color-scheme painting an opaque black canvas behind the page */
+    color-scheme: only light;
+  }
   body {
-    @apply bg-background text-foreground;
+    background: transparent !important;
+    color: var(--foreground);
+    overflow-x: hidden;
+    overscroll-behavior-x: none;
+  }
+  /* Next.js root wrappers must stay see-through for host-app overlays */
+  #__next,
+  [data-overlay-root] {
+    background: transparent !important;
+    min-height: 100%;
+  }
+}
+
+:root {
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+}
+
+/* Popover — original red glow border */
+@keyframes popover-border-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(255, 31, 45, 0.32),
+      0 0 18px 2px rgba(255, 31, 45, 0.14),
+      0 25px 60px -15px rgba(0, 0, 0, 0.6);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1.5px rgba(255, 31, 45, 0.65),
+      0 0 26px 4px rgba(255, 31, 45, 0.28),
+      0 25px 60px -15px rgba(0, 0, 0, 0.6);
+  }
+}
+
+.popover-border-glow {
+  animation: popover-border-pulse 3.5s ease-in-out infinite;
+}
+
+/* Avatar only — Gemini multi-color ring */
+@property --gemini-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes gemini-spin {
+  to {
+    --gemini-angle: 360deg;
+  }
+}
+
+.avatar-gemini-ring {
+  background: conic-gradient(
+    from var(--gemini-angle),
+    #4285f4,
+    #9b72cb,
+    #d96570,
+    #f2a60c,
+    #34a853,
+    #1a73e8,
+    #4285f4
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  animation: gemini-spin 4s linear infinite;
+}
+
+.avatar-gemini-ring-active {
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+}
+
+.avatar-gemini-bloom {
+  background: conic-gradient(
+    from var(--gemini-angle),
+    rgba(66, 133, 244, 0.7),
+    rgba(155, 114, 203, 0.7),
+    rgba(217, 101, 112, 0.65),
+    rgba(242, 166, 12, 0.55),
+    rgba(52, 168, 83, 0.6),
+    rgba(26, 115, 232, 0.7),
+    rgba(66, 133, 244, 0.7)
+  );
+  filter: blur(8px);
+  animation:
+    gemini-spin 4s linear infinite,
+    avatar-bloom-pulse 2.8s ease-in-out infinite;
+}
+
+@keyframes avatar-bloom-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.02);
   }
 }

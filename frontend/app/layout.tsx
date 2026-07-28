@@ -72,7 +72,12 @@ export default function RootLayout({ children }: RootLayoutProps) {
         <title>{pageTitle}</title>
         <meta name="description" content={pageDescription} />
       </head>
-      <body className="overflow-x-hidden" suppressHydrationWarning>
+      <body
+        className="overflow-x-hidden bg-transparent"
+        style={{ background: 'transparent' }}
+        data-overlay-root
+        suppressHydrationWarning
+      >
         <ThemeProvider attribute="class" forcedTheme="dark" disableTransitionOnChange>
           {children}
         </ThemeProvider>

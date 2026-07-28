@@ -162,7 +162,7 @@ def _mint_token(
     voice: str = "",
     trial_seconds: int = -1,
     language: str = "en-US",
-    mode: str = "ramp",
+    anchor_name: str = "NOVA",
 ) -> dict[str, Any]:
     safe_identity = re.sub(r"[^\w\-]", "_", participant_name.lower())[:40]
     participant_identity = f"{safe_identity}_{random.randint(0, 9999)}"
@@ -189,7 +189,7 @@ def _mint_token(
             "voice": voice,
             "trial_seconds": trial_seconds,
             "language": language,
-            "mode": mode,
+            "anchor_name": anchor_name,
         }),
         agents=[lk_api.RoomAgentDispatch(agent_name=agent_name)] if agent_name else [],
     )
@@ -333,10 +333,10 @@ def build_app(cfg: Config) -> FastAPI:
         if language not in _SUPPORTED_LANGUAGES:
             language = "en-US"
 
-        # mode — training mode (whitelist)
-        mode = body.get("mode", "ramp")
-        if mode not in ("ramp", "acting"):
-            mode = "ramp"
+        # anchor_name — display name of the chosen news anchor persona
+        anchor_name = _sanitise_name(body.get("anchor_name") or "NOVA")
+        if anchor_name == "model":  # _sanitise_name's generic fallback — use ours instead
+            anchor_name = "NOVA"
 
         # room assignment
         raw_room = body.get("room_name")
@@ -391,7 +391,7 @@ def build_app(cfg: Config) -> FastAPI:
             data = _mint_token(
                 cfg, agent_name, session_type, room_name, participant_name,
                 face_id, voice, trial_seconds=trial_remaining,
-                language=language, mode=mode,
+                language=language, anchor_name=anchor_name,
             )
         except Exception as exc:
             logger.exception("token minting failed: ip=%s", ip)
