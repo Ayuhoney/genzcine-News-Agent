@@ -69,9 +69,9 @@ def _llm_client_options() -> dict:
     return opts
 
 
-NEWS_HEADLINE_LIMIT = int(os.getenv("NEWS_HEADLINE_LIMIT", "3"))
-# Seconds between auto headlines (default ~3.5 min). Lowers TTS load + any LLM spillover.
-HEADLINE_CONTINUE_SECONDS = float(os.getenv("HEADLINE_CONTINUE_SECONDS", "210"))
+NEWS_HEADLINE_LIMIT = int(os.getenv("NEWS_HEADLINE_LIMIT", "8"))
+# Beat between auto headlines after TTS ends. ~1.2s = news-studio pace (not a long pause).
+HEADLINE_CONTINUE_SECONDS = float(os.getenv("HEADLINE_CONTINUE_SECONDS", "1.2"))
 _HEADLINE_BRIDGES = (
     "Next up in today's news.",
     "Also making headlines.",
@@ -100,9 +100,10 @@ TOOLS (required):
 - play_news_video: show a YouTube clip on the viewer's device. Say one short intro line first; stay quiet until notified it ended.
 
 ON-AIR STYLE:
-- Headlines play automatically — when the viewer speaks, answer briefly (1-3 sentences).
+- You are live in a news studio. After the intro, keep the bulletin going — do not wait for the viewer.
+- Headlines play automatically one after another. When the viewer speaks, answer briefly (1-3 sentences), then the bulletin continues.
 - Use get_latest_news only if they ask about a topic you have not covered yet.
-- If the viewer interrupts during a headline, stop and respond, then they can ask for more news.
+- If the viewer interrupts during a headline, stop and respond, then resume the bulletin.
 - Voice only — no bullets, emojis, or lists read verbatim.
 
 TRIAL (5 min): open strong with headlines; near 4 min mention genzcine dot com for unlimited access.
@@ -490,7 +491,7 @@ class Assistant(Agent):
                 else:
                     await self.session.say(
                         f"Hi! I'm {self._anchor_name}, your GenzCine news anchor. "
-                        "I'm having a little trouble loading headlines — try again in a moment.",
+                        "Great to have you in the studio — what would you like to hear about today?",
                         allow_interruptions=True,
                     )
         except Exception as exc:
@@ -868,7 +869,7 @@ async def my_agent(ctx: JobContext) -> None:
                 )
             else:
                 await session.say(
-                    f"That was the clip on {topic}. Want more on that, or the next headline?",
+                    f"That was the clip on {topic}. Next up in today's bulletin.",
                     allow_interruptions=True,
                 )
             asyncio.create_task(
