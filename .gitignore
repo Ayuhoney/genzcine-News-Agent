@@ -9,4 +9,7 @@ inference/llama/models/
 .env
 .env.*
 docker-compose.override.yml
-*.pnpm-store
+
+# pnpm content-addressable store (local install cache)
+.pnpm-store/
+**/.pnpm-store/
