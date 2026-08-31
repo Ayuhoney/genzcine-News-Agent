@@ -96,7 +96,7 @@ class Config:
 
     # --- Simli ----------------------------------------------------------
     simli_api_key: str = ""
-    simli_face_id: str = "b9e5fba3-071a-4e35-896e-211c4d6eaa7b"
+    simli_face_id: str = "cace3ef7-a4c4-425d-a8cf-a5358eb0c427"
     simli_livekit_url: str = ""  # public URL Simli uses to reach LiveKit (ngrok/tunnel)
 
     # --- Device ---------------------------------------------------------

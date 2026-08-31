@@ -1,9 +1,9 @@
 // Shared anchor (avatar) + language data, used by the floating anchor picker.
 
 export const NOVA_FACE_ID =
-  process.env.NEXT_PUBLIC_NOVA_FACE_ID ?? 'b9e5fba3-071a-4e35-896e-211c4d6eaa7b';
+  process.env.NEXT_PUBLIC_NOVA_FACE_ID ?? 'cace3ef7-a4c4-425d-a8cf-a5358eb0c427';
 export const ARIA_FACE_ID =
-  process.env.NEXT_PUBLIC_ARIA_FACE_ID ?? 'afdb6a3e-3939-40aa-92df-01604c23101c';
+  process.env.NEXT_PUBLIC_ARIA_FACE_ID ?? '5fc23ea5-8175-4a82-aaaf-cdd8c88543dc';
 export const MARK_FACE_ID =
   process.env.NEXT_PUBLIC_MARK_FACE_ID ?? 'dd10cb5a-d31d-4f12-b69f-6db3383c006e';
 
@@ -21,26 +21,26 @@ export interface AnchorOption {
 export const ANCHORS: AnchorOption[] = [
   {
     id: NOVA_FACE_ID,
-    name: 'NOVA',
+    name: 'TINA',
     role: 'Lead News Anchor',
     image: '/avatar-nova.png',
     glowRgba: 'rgba(230,57,70,0.35)',
     slot: 'nova',
     intros: [
-      "Hi, I'm NOVA — GenzCine's lead AI news anchor. Real headlines, live video, real conversation.",
+      "Hi, I'm TINA — GenzCine's lead AI news anchor. Real headlines, live video, real conversation.",
       'I open with top stories, dig into what you care about, and keep the broadcast tight and clear.',
       'Ask for politics, tech, entertainment, or a quick brief — then go live whenever you are ready.',
     ],
   },
   {
     id: ARIA_FACE_ID,
-    name: 'ARIA',
+    name: 'MAYA',
     role: 'International Anchor',
     image: '/avatar-aria.png',
     glowRgba: 'rgba(139,92,246,0.30)',
     slot: 'aria',
     intros: [
-      "Hi, I'm ARIA — your international desk. Global headlines, world affairs, and cross-border stories.",
+      "Hi, I'm MAYA — your international desk. Global headlines, world affairs, and cross-border stories.",
       'I cover geopolitics, markets abroad, culture, and breaking news from every region you follow.',
       'Pick a language, tell me what beat matters to you, and we will go live around the world.',
     ],

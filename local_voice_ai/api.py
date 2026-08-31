@@ -58,8 +58,8 @@ SIMLI_STATUS_URL = "https://api.simli.ai/faces/trinity/generation_status"
 
 _ALLOWED_FACE_IDS: frozenset[str] = frozenset(
     {
-        "b9e5fba3-071a-4e35-896e-211c4d6eaa7b",  # NOVA
-        "afdb6a3e-3939-40aa-92df-01604c23101c",  # ARIA
+        "cace3ef7-a4c4-425d-a8cf-a5358eb0c427",  # TINA
+        "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc",  # MAYA
         "dd10cb5a-d31d-4f12-b69f-6db3383c006e",  # MARK
     }
 )

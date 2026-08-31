@@ -50,7 +50,7 @@ TTS_API_KEY  = os.getenv("TTS_API_KEY",  "no-key-needed")
 
 # Simli
 SIMLI_API_KEY      = os.getenv("SIMLI_API_KEY",      "")
-SIMLI_FACE_ID      = os.getenv("SIMLI_FACE_ID",      "b9e5fba3-071a-4e35-896e-211c4d6eaa7b")
+SIMLI_FACE_ID      = os.getenv("SIMLI_FACE_ID",      "cace3ef7-a4c4-425d-a8cf-a5358eb0c427")
 SIMLI_LIVEKIT_URL  = os.getenv("SIMLI_LIVEKIT_URL",  "")  # public tunnel URL for Simli
 
 def _is_local_service_url(url: str) -> bool:
