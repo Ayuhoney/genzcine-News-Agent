@@ -8,10 +8,7 @@ from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 logger = logging.getLogger("db")
 
-MONGODB_URL = os.getenv(
-    "MONGODB_URL",
-    "",
-)
+MONGODB_URL = os.getenv("MONGODB_URL", "")
 DB_NAME = os.getenv("MONGODB_DB", "genzpublic")
 
 _client: AsyncIOMotorClient | None = None  # type: ignore[type-arg]
@@ -25,6 +22,8 @@ def get_db() -> AsyncIOMotorDatabase:  # type: ignore[type-arg]
 
 async def connect_db() -> None:
     global _client
+    if not MONGODB_URL:
+        raise RuntimeError("MONGODB_URL is not set")
     logger.info("Connecting to MongoDB…")
     _client = AsyncIOMotorClient(MONGODB_URL, serverSelectionTimeoutMS=6_000)
     await _client.admin.command("ping")  # fail fast if unreachable
