@@ -8,6 +8,5 @@ inference/llama/models/
 # Local secrets — never commit
 .env
 .env.*
-!.env.example
 docker-compose.override.yml
 *.pnpm-store
