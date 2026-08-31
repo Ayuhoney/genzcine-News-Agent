@@ -5,6 +5,9 @@ inference/llama/models/
 **/__pycache__/
 *.pyc
 
-# # Local dev overrides (not for production)
-# docker-compose.override.yml
-# .env
+# Local secrets — never commit
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+*.pnpm-store
