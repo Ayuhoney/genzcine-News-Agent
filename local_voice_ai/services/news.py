@@ -28,7 +28,7 @@ _NEWSDATA_LANG: dict[str, str] = {
 async def fetch_latest_news(
     query: Optional[str] = None,
     language: str = "en-US",
-    limit: int = 5,
+    limit: int = 3,
 ) -> list[dict[str, Any]]:
     """Return up to ``limit`` recent articles, optionally filtered by ``query``.
 

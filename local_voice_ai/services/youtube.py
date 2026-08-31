@@ -22,6 +22,8 @@ YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 class VideoResult(TypedDict):
     video_id: str
     title: str
+    thumbnail_url: str
+    channel_title: str
 
 
 async def search_news_video(query: str) -> Optional[VideoResult]:
@@ -60,4 +62,16 @@ async def search_news_video(query: str) -> Optional[VideoResult]:
     if not video_id:
         return None
     title = (item.get("snippet") or {}).get("title") or query
-    return {"video_id": str(video_id), "title": str(title)}
+    snippet = item.get("snippet") or {}
+    thumbs = snippet.get("thumbnails") or {}
+    thumb = (
+        (thumbs.get("medium") or {}).get("url")
+        or (thumbs.get("default") or {}).get("url")
+        or ""
+    )
+    return {
+        "video_id": str(video_id),
+        "title": str(title),
+        "thumbnail_url": str(thumb),
+        "channel_title": str(snippet.get("channelTitle") or ""),
+    }

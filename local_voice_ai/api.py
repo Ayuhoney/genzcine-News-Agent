@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -15,14 +16,17 @@ from typing import Any, Optional
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from livekit import api as lk_api
 from livekit.protocol.room import RoomConfiguration
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import Config
+from .services.agent_errors import api_error_payload
 from .services.db import close_db, connect_db
+from .services.news import fetch_latest_news
+from .services.studio_events import STUDIO_TOPIC, headline_article
 from .services.user_service import (
     complete_session,
     get_or_create_device,
@@ -196,7 +200,8 @@ def _mint_token(
     token = token.with_room_config(room_cfg)
 
     return {
-        "serverUrl": cfg.livekit_url,
+        # Public wss URL for browsers; internal agent still uses LIVEKIT_URL.
+        "serverUrl": cfg.simli_livekit_url or cfg.livekit_url,
         "roomName": room_name,
         "sessionType": session_type,
         "participantName": participant_name,
@@ -218,16 +223,39 @@ def build_app(cfg: Config) -> FastAPI:
 
     app = FastAPI(title="genzcine-ai", version="1.0.0", lifespan=lifespan)
 
+    cors_origins = [
+        o
+        for o in [
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://localhost:5173",
+            "http://localhost:5174",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:5174",
+            os.getenv("PUBLIC_ORIGIN", "").rstrip("/"),
+            *[
+                part.strip().rstrip("/")
+                for part in os.getenv("CORS_EXTRA_ORIGINS", "").split(",")
+                if part.strip()
+            ],
+        ]
+        if o
+    ]
+    # De-dupe while preserving order.
+    _seen: set[str] = set()
+    cors_origins = [o for o in cors_origins if not (o in _seen or _seen.add(o))]
+
     app.add_middleware(_AccessLogMiddleware)
     app.add_middleware(_SecurityHeadersMiddleware)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://localhost:3001",
-            "http://127.0.0.1:3000",
-        ],
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_origins=cors_origins,
+        allow_origin_regex=os.getenv(
+            "CORS_ALLOW_ORIGIN_REGEX",
+            r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+        ),
+        allow_methods=["GET", "HEAD", "POST", "OPTIONS"],
         allow_headers=["Content-Type"],
         allow_credentials=True,
         max_age=600,
@@ -292,6 +320,38 @@ def build_app(cfg: Config) -> FastAPI:
             logger.exception("device_avatar failed: id=%s face=%s", device_id, face_id)
         return JSONResponse({"ok": True})
 
+    # ── News headlines (REST — for studio UI before/during session) ───────────
+
+    @app.get("/api/news/headlines")
+    async def news_headlines(request: Request) -> JSONResponse:
+        """Return live headlines for news-studio ticker/cards without joining a room."""
+        topic = str(request.query_params.get("topic", "") or "")[:100]
+        language = str(request.query_params.get("language", "en-US") or "en-US")
+        if language not in _SUPPORTED_LANGUAGES:
+            language = "en-US"
+        try:
+            limit = min(10, max(1, int(request.query_params.get("limit", "5"))))
+        except (TypeError, ValueError):
+            limit = 5
+
+        articles = await fetch_latest_news(
+            query=topic or None,
+            language=language,
+            limit=limit,
+        )
+        items = [headline_article(a, index=i) for i, a in enumerate(articles)]
+        return JSONResponse(
+            {
+                "topic": topic,
+                "language": language,
+                "articles": items,
+                "activeIndex": 0 if items else -1,
+                "activeHeadline": items[0] if items else None,
+                "studioEventsTopic": STUDIO_TOPIC,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     # ── Connection details ────────────────────────────────────────────────────
 
     @app.post("/api/connection-details")
@@ -299,7 +359,7 @@ def build_app(cfg: Config) -> FastAPI:
         ip = _client_ip(request)
         if _is_rate_limited(ip):
             logger.warning("rate limit hit: ip=%s", ip)
-            raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+            raise HTTPException(status_code=429, detail=api_error_payload("rate_limited"))
 
         try:
             body = await request.json()
@@ -379,7 +439,7 @@ def build_app(cfg: Config) -> FastAPI:
                         logger.info("trial exhausted: device=%s ip=%s", device_id, ip)
                         raise HTTPException(
                             status_code=402,
-                            detail="trial_expired",
+                            detail=api_error_payload("trial_expired"),
                         )
             except HTTPException:
                 raise
@@ -395,9 +455,35 @@ def build_app(cfg: Config) -> FastAPI:
             )
         except Exception as exc:
             logger.exception("token minting failed: ip=%s", ip)
-            raise HTTPException(status_code=500, detail="Session could not be created.") from exc
+            raise HTTPException(
+                status_code=500,
+                detail=api_error_payload("session_unavailable"),
+            ) from exc
 
         data["trialRemainingSeconds"] = trial_remaining
+        data["studioEventsTopic"] = STUDIO_TOPIC
+        data["transcriptTopic"] = "genzcine_transcript"
+        data["legacyVideoTopic"] = "news_video"
+
+        if body.get("include_headlines"):
+            try:
+                headline_topic = str(body.get("headline_topic", "") or "")[:100]
+                headline_limit = min(10, max(1, int(body.get("headline_limit", 5))))
+            except (TypeError, ValueError):
+                headline_topic = ""
+                headline_limit = 5
+            articles = await fetch_latest_news(
+                query=headline_topic or None,
+                language=language,
+                limit=headline_limit,
+            )
+            items = [headline_article(a, index=i) for i, a in enumerate(articles)]
+            data["headlines"] = {
+                "topic": headline_topic,
+                "articles": items,
+                "activeIndex": 0 if items else -1,
+                "activeHeadline": items[0] if items else None,
+            }
 
         # persist to MongoDB (non-blocking best-effort)
         if device_id:
@@ -591,8 +677,11 @@ def build_app(cfg: Config) -> FastAPI:
     if cfg.frontend_dir:
         static = StaticFiles(directory=cfg.frontend_dir, html=True)
 
-        @app.get("/{path:path}")
+        # LiveKit JS prepareConnection() sends HEAD to the serverUrl origin.
+        @app.api_route("/{path:path}", methods=["GET", "HEAD"])
         async def spa(path: str, request: Request) -> Any:
+            if request.method == "HEAD":
+                return Response(status_code=200)
             try:
                 return await static.get_response(path or "index.html", request.scope)
             except Exception:

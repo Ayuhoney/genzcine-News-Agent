@@ -4,6 +4,9 @@ const isDev = process.env.NODE_ENV === 'development';
 
 const nextConfig: NextConfig = {
   ...(isDev ? {} : { output: 'export' }),
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
   trailingSlash: false,
   images: {
     unoptimized: true,

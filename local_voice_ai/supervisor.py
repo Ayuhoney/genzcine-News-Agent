@@ -29,6 +29,7 @@ class ChildSpec:
     env: dict[str, str] = field(default_factory=dict)
     cwd: Optional[str] = None
     ready_url: Optional[str] = None
+    ready_headers: dict[str, str] = field(default_factory=dict)
     ready_timeout: float = 180.0
     max_restarts: int = 5
 
@@ -174,7 +175,7 @@ class Supervisor:
                     f"{child.spec.name}: exited (rc={child.process.returncode}) before ready"
                 )
             try:
-                resp = await self._http.get(child.spec.ready_url)
+                resp = await self._http.get(child.spec.ready_url, headers=child.spec.ready_headers)
                 if resp.status_code < 400:
                     child.ready = True
                     logger.info("[%s] ready", child.spec.name)

@@ -62,6 +62,8 @@ class Config:
     llama_model_alias: str = "qwen3-4b"
     llama_ctx_size: int = 16384
     llama_n_gpu_layers: int = 0
+    llama_n_threads: int = 4
+    llama_parallel: int = 1
     llama_bind_port: int = 11434
     manage_llama: bool = True
 
@@ -147,6 +149,8 @@ class Config:
             llama_model_alias=os.getenv("LLAMA_MODEL_ALIAS", cls.llama_model_alias),
             llama_ctx_size=int(os.getenv("LLAMA_CTX_SIZE", str(cls.llama_ctx_size))),
             llama_n_gpu_layers=int(os.getenv("LLAMA_N_GPU_LAYERS", str(cls.llama_n_gpu_layers))),
+            llama_n_threads=int(os.getenv("LLAMA_N_THREADS", str(cls.llama_n_threads))),
+            llama_parallel=int(os.getenv("LLAMA_PARALLEL", str(cls.llama_parallel))),
             llama_bind_port=int(os.getenv("LLAMA_BIND_PORT", str(cls.llama_bind_port))),
             manage_llama=_env_bool("MANAGE_LLAMA", _is_loopback(llama_base_url)),
             #

@@ -40,6 +40,15 @@ class TestHealth:
         assert r.json() == {"status": "ok"}
 
 
+class TestCors:
+    def test_head_root_allows_localhost_dev_origin(self, client: TestClient) -> None:
+        r = client.head(
+            "/",
+            headers={"Origin": "http://localhost:5174"},
+        )
+        assert r.status_code == 200
+        assert r.headers.get("access-control-allow-origin") == "http://localhost:5174"
+
 class TestConnectionDetails:
     def test_mints_token_with_empty_body(self, client: TestClient) -> None:
         r = client.post("/api/connection-details", json={})

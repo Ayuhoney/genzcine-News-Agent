@@ -71,9 +71,13 @@ def _build_specs(cfg: Config) -> list[ChildSpec]:
                     "--alias", cfg.llama_model_alias,
                     "--ctx-size", str(cfg.llama_ctx_size),
                     "--n-gpu-layers", str(cfg.llama_n_gpu_layers),
+                    "--threads", str(cfg.llama_n_threads),
+                    "--parallel", str(cfg.llama_parallel),
+                    "--api-key", cfg.llama_api_key,
                 ],
                 env={"HF_HOME": os.getenv("HF_HOME", "/models"), "XDG_CACHE_HOME": os.getenv("XDG_CACHE_HOME", "/models")},
                 ready_url=f"http://127.0.0.1:{cfg.llama_bind_port}/v1/models",
+                ready_headers={"Authorization": f"Bearer {cfg.llama_api_key}"},
                 ready_timeout=900.0,  # first-run model download can be slow
             )
         )

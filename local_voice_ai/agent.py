@@ -3,7 +3,11 @@ import json
 import logging
 import os
 import time
+from typing import Any
 
+from urllib.parse import urlparse
+
+import httpx
 from livekit import rtc
 from livekit.agents import (
     Agent,
@@ -14,11 +18,14 @@ from livekit.agents import (
     RunContext,
     cli,
     function_tool,
+    room_io,
 )
 from livekit.plugins import openai, silero, simli
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
+from .services.agent_errors import classify_agent_error
 from .services.news import fetch_latest_news
+from .services.studio_events import STUDIO_TOPIC, headline_article, publish_studio_event
 from .services.youtube import search_news_video
 
 logger = logging.getLogger("agent")
@@ -46,77 +53,59 @@ SIMLI_API_KEY      = os.getenv("SIMLI_API_KEY",      "")
 SIMLI_FACE_ID      = os.getenv("SIMLI_FACE_ID",      "b9e5fba3-071a-4e35-896e-211c4d6eaa7b")
 SIMLI_LIVEKIT_URL  = os.getenv("SIMLI_LIVEKIT_URL",  "")  # public tunnel URL for Simli
 
+def _is_local_service_url(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    return host in {"", "127.0.0.1", "localhost", "::1"}
+
+
+def _llm_client_options() -> dict:
+    """Cap completion length; local llama.cpp also needs a longer read timeout."""
+    opts: dict = {
+        "max_completion_tokens": int(os.getenv("LLM_MAX_COMPLETION_TOKENS", "150")),
+    }
+    if _is_local_service_url(LLM_BASE_URL):
+        read_s = float(os.getenv("LLM_READ_TIMEOUT", "120"))
+        opts["timeout"] = httpx.Timeout(connect=15.0, read=read_s, write=30.0, pool=5.0)
+    return opts
+
+
+NEWS_HEADLINE_LIMIT = int(os.getenv("NEWS_HEADLINE_LIMIT", "3"))
+# Seconds between auto headlines (default ~3.5 min). Lowers TTS load + any LLM spillover.
+HEADLINE_CONTINUE_SECONDS = float(os.getenv("HEADLINE_CONTINUE_SECONDS", "210"))
+_HEADLINE_BRIDGES = (
+    "Next up in today's news.",
+    "Also making headlines.",
+    "In other news.",
+    "Moving on.",
+)
+
+_TRIAL_WARN_SAY = (
+    "Just a heads up — about one minute left in your free GenzCine trial. "
+    "Visit genzcine dot com for unlimited live news with me."
+)
+_TRIAL_END_SAY = (
+    "Your free trial has ended. Thanks for watching today's news with GenzCine! "
+    "Unlock unlimited access at genzcine dot com. Goodbye for now!"
+)
+
+
+LLM_OPTS = _llm_client_options()
+
 _BASE_INSTRUCTIONS = """
-You are {anchor_name}, GenzCine's AI news anchor — a live, real-time broadcast presenter who
-reports the latest headlines and talks through the news with the viewer, the way a real anchor
-does on a live segment. GenzCine is a next-generation media and entertainment platform based in
-Mohali, Punjab, India.
+You are {anchor_name}, GenzCine's AI news anchor — live, warm, authoritative. GenzCine is a
+media platform in Mohali, Punjab, India (genzcine.com).
 
-YOUR ROLE:
-You host a live, interactive news session. You are not reading a script at a viewer — you are
-having a real conversation about what's happening in the world right now, the way a trusted
-anchor talks to camera and then to a guest or caller.
+TOOLS (required):
+- get_latest_news: fetch real headlines. Call before reporting ANY current news. Never invent headlines.
+- play_news_video: show a YouTube clip on the viewer's device. Say one short intro line first; stay quiet until notified it ended.
 
-HOW YOU GET NEWS:
-You have a tool called get_latest_news that fetches real, live headlines. You do NOT know
-today's news on your own — you must call this tool to get real information before reporting
-anything as current news. Never invent or guess a headline.
-- Call get_latest_news with no topic near the start of the session for top general headlines
-- Call it again with a topic (e.g. "technology", "cricket", "stock market", "elections",
-  "Bollywood", "AI") whenever the viewer asks about a specific subject, or when you want to
-  pivot the broadcast to a new beat
-- After the tool returns, do NOT just read the raw list back. Digest it like a real anchor:
-  pick the 2-4 most interesting or important stories, summarize each in your own words in one
-  or two spoken sentences, and add a line of context or a follow-up question for the viewer
-- If the tool returns nothing, say so briefly and naturally ("looks like I can't pull fresh
-  headlines on that right this second") and keep the conversation going — never go silent
+ON-AIR STYLE:
+- Headlines play automatically — when the viewer speaks, answer briefly (1-3 sentences).
+- Use get_latest_news only if they ask about a topic you have not covered yet.
+- If the viewer interrupts during a headline, stop and respond, then they can ask for more news.
+- Voice only — no bullets, emojis, or lists read verbatim.
 
-SHOWING VIDEO:
-You have a tool called play_news_video that pulls up a real, relevant video clip full-screen on
-the viewer's device for a story or topic.
-- Use it when the viewer asks to see footage/a video, or when a story is clearly visual
-  (a major event, a sports highlight, a trailer, a product reveal) and a clip would land better
-  than words alone
-- Before calling it, say ONE short line like "let's take a look" or "here's the footage" —
-  nothing more
-- While the clip plays you will be notified when it ends — until then, stay quiet
-- When notified the video ended (or was skipped), react briefly to what played and continue
-  the broadcast from where you left off
-
-TEACHING METHOD FOR A LIVE BROADCAST:
-- Open with a short, warm greeting and immediately move into today's top headlines
-- Talk WITH the viewer, not AT them — ask what they want more on, invite reactions and
-  questions, and actually answer them using fresh tool calls when the topic shifts
-- Keep each turn tight: this is a spoken, real-time format — no long monologues, no reading
-  lists verbatim
-- If the viewer asks a question outside the news (general chat, asking who you are, small talk)
-  respond naturally and briefly, then steer back toward the broadcast
-- If a story is developing or uncertain, say so honestly — never fabricate details a headline
-  didn't give you
-
-ABOUT GENZCINE:
-GenzCine is a transparent, new-age media platform. Beyond general news, you're happy to go deep
-on entertainment, film industry, and pop-culture stories when the viewer is interested — that's
-GenzCine's home turf. Website: genzcine.com | Mohali, Punjab, India.
-
-STRICT RULES:
-- Only ever report news that came from a get_latest_news tool call in THIS session — never
-  invent headlines, dates, statistics, or quotes
-- Keep each response short and conversational — this is a VOICE interface
-- Never use bullet points, asterisks, or emojis in speech
-- Speak like a real, warm, authoritative broadcast anchor — not a robot reading a feed
-- Never skip a topic shift without pulling fresh headlines for it first
-
-FREE TRIAL SESSION GUIDELINES:
-This is a free 5-minute trial session. Make every second count:
-- Open with a warm 10-second greeting, pull top headlines immediately, and start the broadcast
-- Keep it tight — one story beat per turn, no long monologues
-- After about 4 minutes, naturally say: "We are coming up on the end of today's free session.
-  Thanks for tuning in. For unlimited live news updates every day, upgrade to GenzCine Premium
-  at genzcine dot com."
-- If the viewer asks about pricing or more sessions, say: "Head to genzcine dot com to unlock
-  full access — unlimited live sessions, breaking news alerts, and every beat you care about."
-- Never say "trial" in a negative way — frame it as a preview of the full broadcast
+TRIAL (5 min): open strong with headlines; near 4 min mention genzcine dot com for unlimited access.
 """
 
 # Session languages — Kokoro TTS lang codes: a/b (English), e, f, h, i, j, p, z.
@@ -160,35 +149,128 @@ _GROUP_ADDON = (
     "- Greet new participants who join mid-session by name"
 )
 
-# Spoken when the LLM is down (rate limit / outage) — TTS-only, no LLM call.
+# Default spoken line when error type can't be determined (TTS-only, no LLM).
 _BUSY_FALLBACK = (
-    "Hi, I'm having a little trouble reaching the news desk right now. "
-    "Please try again after some time — I'll be right here when you're ready."
+    "Hi — I'm having a little trouble reaching the news desk right now. "
+    "Please disconnect and try again in a moment. I'll be right here when you're ready."
 )
 
 
-async def _say_busy_fallback(session: AgentSession, *, reason: str = "llm_error") -> None:
-    """Speak a calm, greeting-style apology via TTS only (no LLM)."""
+def _trim_description(text: str, *, limit: int = 100) -> str:
+    clean = (text or "").strip()
+    if len(clean) <= limit:
+        return clean
+    cut = clean[: limit - 3].rsplit(" ", 1)[0]
+    return f"{cut}..."
+
+
+def _headline_spoken_line(
+    anchor_name: str,
+    article: dict,
+    *,
+    is_first: bool = False,
+    index: int = 0,
+    viewer_name: str | None = None,
+) -> str:
+    title = str(article.get("title", "")).strip()
+    desc = _trim_description(str(article.get("description", "")))
+    if is_first:
+        who = f" {viewer_name}" if viewer_name else ""
+        greet = f"Hey{who}! I'm {anchor_name}, your GenzCine news anchor. This is today's news."
+        body = f" {title}. {desc}" if desc else f" {title}."
+        return f"{greet}{body}".strip()
+    bridge = _HEADLINE_BRIDGES[index % len(_HEADLINE_BRIDGES)]
+    body = f" {title}. {desc}" if desc else f" {title}."
+    return f"{bridge}{body}".strip()
+
+
+async def _refresh_headlines(agent: "Assistant", *, topic: str = "") -> bool:
+    articles = await fetch_latest_news(
+        query=topic or None,
+        language=agent._language,
+        limit=NEWS_HEADLINE_LIMIT,
+    )
+    if not articles:
+        return False
+    await agent._publish_headlines(articles, topic=topic)
+    return True
+
+
+# When True for a room, the next agent transcript is skipped (error TTS apology).
+_skip_agent_transcript: dict[str, bool] = {}
+
+
+async def _handle_agent_error(
+    session: AgentSession,
+    room: rtc.Room | None,
+    err: Any,
+    *,
+    reason: str = "unknown",
+    anchor_name: str = "NOVA",
+    source: str = "",
+) -> None:
+    """Speak a specific apology via TTS and push a structured error to the studio UI."""
+    info = classify_agent_error(err, source=source or reason)
+    room_name = room.name if room else ""
     try:
-        logger.warning("speaking busy fallback (%s)", reason)
-        await session.say(_BUSY_FALLBACK, allow_interruptions=True)
+        logger.warning("agent error (%s / %s): code=%s", reason, source, info.code)
+        if room_name:
+            _skip_agent_transcript[room_name] = True
+        await publish_studio_event(room, info.to_studio_event(anchor_name=anchor_name))
+        await session.say(info.spoken, allow_interruptions=True)
     except Exception:
-        logger.exception("busy fallback say() also failed")
+        logger.exception("agent error handler failed — last-resort fallback")
+        try:
+            if room_name:
+                _skip_agent_transcript[room_name] = True
+            await publish_studio_event(
+                room,
+                classify_agent_error("unknown").to_studio_event(anchor_name=anchor_name),
+            )
+            await session.say(_BUSY_FALLBACK, allow_interruptions=True)
+        except Exception:
+            pass
+    finally:
+        if room_name:
+            async def _clear_skip() -> None:
+                await asyncio.sleep(4)
+                _skip_agent_transcript.pop(room_name, None)
+            asyncio.create_task(_clear_skip())
+
+
+async def _say_busy_fallback(
+    session: AgentSession,
+    room: rtc.Room | None = None,
+    *,
+    reason: str = "llm_error",
+    anchor_name: str = "NOVA",
+) -> None:
+    """Legacy entry — routes through structured error handler."""
+    await _handle_agent_error(
+        session, room, reason, reason=reason, anchor_name=anchor_name, source=reason
+    )
 
 
 async def _safe_generate_reply(
     session: AgentSession,
+    room: rtc.Room | None,
     *,
     instructions: str,
     fallback_reason: str = "generate_reply_failed",
+    anchor_name: str = "NOVA",
 ) -> bool:
-    """Try LLM reply; on failure speak the busy fallback instead of going silent."""
+    """Try LLM reply; on failure speak a structured error instead of going silent."""
     try:
         await session.generate_reply(instructions=instructions)
         return True
-    except Exception:
+    except Exception as exc:
         logger.exception("generate_reply failed — %s", fallback_reason)
-        await _say_busy_fallback(session, reason=fallback_reason)
+        await _handle_agent_error(
+            session, room, exc,
+            reason=fallback_reason,
+            anchor_name=anchor_name,
+            source="LLM",
+        )
         return False
 
 
@@ -205,6 +287,9 @@ class Assistant(Agent):
         self._room = room
         self._anchor_name = anchor_name
         self._language = language
+        self._video_playing = False
+        self._last_headlines: list[dict] = []
+        self._headline_index = 0
 
         instructions = (
             _BASE_INSTRUCTIONS.format(anchor_name=anchor_name)
@@ -212,6 +297,64 @@ class Assistant(Agent):
             + (_GROUP_ADDON if session_type == "group" else "")
         )
         super().__init__(instructions=instructions)
+
+    async def _publish_studio(self, event: dict) -> None:
+        await publish_studio_event(self._room, event)
+
+    async def _publish_headlines(self, articles: list[dict], *, topic: str = "") -> None:
+        self._last_headlines = articles
+        self._headline_index = 0
+        items = [headline_article(a, index=i) for i, a in enumerate(articles)]
+        await self._publish_studio(
+            {
+                "type": "headlines",
+                "topic": topic,
+                "articles": items,
+                "activeIndex": 0,
+                "activeHeadline": items[0] if items else None,
+            }
+        )
+
+    async def _publish_headline_now(self) -> None:
+        if not self._last_headlines:
+            return
+        idx = self._headline_index % len(self._last_headlines)
+        article = headline_article(self._last_headlines[idx], index=idx)
+        await self._publish_studio(
+            {
+                "type": "headline_now",
+                "activeIndex": idx,
+                "headline": article,
+            }
+        )
+        self._headline_index += 1
+
+    async def _deliver_headline_via_tts(
+        self,
+        *,
+        is_first: bool = False,
+        viewer_name: str | None = None,
+    ) -> bool:
+        """Speak the next headline via TTS only — no LLM call (saves tokens)."""
+        if (
+            not self._last_headlines
+            or self._headline_index >= len(self._last_headlines)
+        ):
+            if not await _refresh_headlines(self):
+                return False
+
+        idx = self._headline_index % len(self._last_headlines)
+        article = self._last_headlines[idx]
+        text = _headline_spoken_line(
+            self._anchor_name,
+            article,
+            is_first=is_first,
+            index=idx,
+            viewer_name=viewer_name,
+        )
+        await self._publish_headline_now()
+        await self.session.say(text, allow_interruptions=True)
+        return True
 
     @function_tool
     async def get_latest_news(self, context: RunContext, topic: str = "") -> str:
@@ -224,19 +367,30 @@ class Assistant(Agent):
             topic: Optional subject to search for (e.g. "technology", "cricket",
                 "stock market", "Bollywood"). Leave empty for general top headlines.
         """
-        articles = await fetch_latest_news(query=topic or None, language=self._language)
+        articles = await fetch_latest_news(
+            query=topic or None, language=self._language, limit=NEWS_HEADLINE_LIMIT
+        )
         if not articles:
+            await self._publish_studio(
+                {
+                    "type": "agent_error",
+                    "code": "news_unavailable",
+                    "title": "Headlines unavailable",
+                    "message": "Live headlines couldn't be loaded right now.",
+                    "retryable": True,
+                    "retryAfterSeconds": 30,
+                    "topic": topic or "",
+                }
+            )
             return (
                 "No fresh headlines could be fetched right now. Tell the viewer briefly and "
                 "naturally, then keep the conversation going without inventing news."
             )
-        lines = [
-            f"- {a['title']} — {a['description']} (source: {a['source']})"
-            for a in articles
-        ]
+        await self._publish_headlines(articles, topic=topic or "")
+        lines = [f"- {a['title']} ({a['source']})" for a in articles]
         return (
-            "Live headlines just fetched (use ONLY this real data, do not invent anything "
-            "beyond it):\n" + "\n".join(lines)
+            "Headlines fetched (titles only — expand briefly when speaking, do not invent):\n"
+            + "\n".join(lines)
         )
 
     @function_tool
@@ -254,25 +408,47 @@ class Assistant(Agent):
             return "Video playback unavailable right now — continue reporting verbally."
         result = await search_news_video(topic)
         if result is None:
+            await self._publish_studio(
+                {"type": "video_error", "topic": topic, "message": "video_not_found"}
+            )
             return f"Could not find a video for '{topic}' — continue reporting verbally."
+        video_id = result["video_id"]
+        video_title = result["title"]
+        thumbnail = result.get("thumbnail_url", "")
+        channel = result.get("channel_title", "")
+        studio_video = {
+            "type": "video_start",
+            "videoId": video_id,
+            "title": video_title,
+            "topic": topic,
+            "thumbnailUrl": thumbnail,
+            "channelTitle": channel,
+            "embedUrl": f"https://www.youtube.com/embed/{video_id}",
+        }
         try:
-            payload = json.dumps(
+            # Legacy topic — existing clients still listen here.
+            legacy_payload = json.dumps(
                 {
                     "type": "news_video",
-                    "videoId": result["video_id"],
-                    "title": result["title"],
+                    "videoId": video_id,
+                    "title": video_title,
                     "topic": topic,
+                    "thumbnailUrl": thumbnail,
+                    "channelTitle": channel,
                 }
             )
             await self._room.local_participant.publish_data(
-                payload.encode(), reliable=True, topic="news_video"
+                legacy_payload.encode(), reliable=True, topic="news_video"
             )
+            await self._publish_studio(studio_video)
+            await self._publish_studio({"type": "studio_state", "mode": "video", "topic": topic})
         except Exception:
             logger.exception("play_news_video publish failed")
             return "Could not start the video — continue reporting verbally."
-        logger.info("[%s] news video started: topic=%r video_id=%s", self._session_type, topic, result["video_id"])
+        logger.info("[%s] news video started: topic=%r video_id=%s", self._session_type, topic, video_id)
+        self._video_playing = True
         return (
-            f"Video '{result['title']}' is now playing full-screen on the viewer's device. "
+            f"Video '{video_title}' is now playing full-screen on the viewer's device. "
             "Say ONE short line introducing it, then stay quiet until notified it ended."
         )
 
@@ -291,36 +467,41 @@ class Assistant(Agent):
             if self._session_type == "group":
                 count = len(participant_names)
                 name_list = ", ".join(participant_names) if participant_names else "everyone"
-                await _safe_generate_reply(
-                    self.session,
-                    instructions=(
-                        f"You are opening a live GROUP news broadcast as {self._anchor_name}, "
-                        f"GenzCine's AI news anchor. There are currently {count} viewer(s) in "
-                        f"the room: {name_list}. Welcome them warmly by name, briefly say you're "
-                        "about to bring them today's top headlines, then call get_latest_news "
-                        "and start the broadcast. Keep it high-energy and under 5 sentences "
-                        "before the first headline."
-                    ),
-                    fallback_reason="on_enter_group",
-                )
+                if await _refresh_headlines(self):
+                    greet = (
+                        f"Hey {name_list}! I'm {self._anchor_name}, live with GenzCine News "
+                        f"for our group of {count}. Here's what's happening right now."
+                    )
+                    await self.session.say(greet, allow_interruptions=True)
+                    await self._deliver_headline_via_tts(is_first=False)
+                else:
+                    await self.session.say(
+                        f"Hey {name_list}! I'm {self._anchor_name}. "
+                        "Headlines are loading — hang tight.",
+                        allow_interruptions=True,
+                    )
             else:
                 viewer_name = participant_names[0] if participant_names else None
-                name_line = f"Address the viewer by their name: {viewer_name}. " if viewer_name else ""
-                await _safe_generate_reply(
-                    self.session,
-                    instructions=(
-                        f"{name_line}"
-                        f"Introduce yourself as {self._anchor_name}, GenzCine's AI news anchor, "
-                        "in one warm sentence. Then immediately call get_latest_news for top "
-                        "general headlines and start reporting — do not wait to be asked. "
-                        "Be warm, direct, and professional. Under 5 sentences before your first "
-                        "headline."
-                    ),
-                    fallback_reason="on_enter_individual",
-                )
-        except Exception:
+                if await _refresh_headlines(self):
+                    await self._deliver_headline_via_tts(
+                        is_first=True,
+                        viewer_name=viewer_name,
+                    )
+                else:
+                    await self.session.say(
+                        f"Hi! I'm {self._anchor_name}, your GenzCine news anchor. "
+                        "I'm having a little trouble loading headlines — try again in a moment.",
+                        allow_interruptions=True,
+                    )
+        except Exception as exc:
             logger.exception("[%s] on_enter failed — attempting fallback greeting", self._session_type)
-            await _say_busy_fallback(self.session, reason="on_enter_exception")
+            await _handle_agent_error(
+                self.session,
+                self._room,
+                exc,
+                reason="on_enter_exception",
+                anchor_name=self._anchor_name,
+            )
 
     def _on_participant_connected(self, participant: rtc.RemoteParticipant) -> None:
         try:
@@ -390,11 +571,32 @@ async def my_agent(ctx: JobContext) -> None:
 
     session = AgentSession(
         stt=openai.STT(base_url=STT_BASE_URL, model=STT_MODEL, api_key=STT_API_KEY),
-        llm=openai.LLM(base_url=LLM_BASE_URL, model=LLM_MODEL, api_key=LLM_API_KEY),
+        llm=openai.LLM(
+            base_url=LLM_BASE_URL,
+            model=LLM_MODEL,
+            api_key=LLM_API_KEY,
+            **LLM_OPTS,
+        ),
         tts=openai.TTS(base_url=TTS_BASE_URL, model="tts-1", voice=voice, api_key=TTS_API_KEY),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        preemptive_generation=True,
+        turn_handling={
+            "interruption": {
+                "enabled": True,
+                "min_duration": 0.35,
+                "min_words": 0,
+                "resume_false_interruption": True,
+                "false_interruption_timeout": 1.5,
+            },
+            "endpointing": {
+                "min_delay": 0.35,
+                "max_delay": 2.5,
+            },
+            "preemptive_generation": {
+                "enabled": True,
+                "preemptive_tts": True,
+            },
+        },
     )
 
     if SIMLI_API_KEY and face_id:
@@ -439,43 +641,244 @@ async def my_agent(ctx: JobContext) -> None:
             if now - _last_error_say_at < 45.0:
                 return
             _last_error_say_at = now
-            logger.warning("session error (%s / %s) — scheduling busy fallback", err_type, source_name)
-            asyncio.create_task(_say_busy_fallback(session, reason=f"session_error:{err_type}"))
+            logger.warning("session error (%s / %s) — scheduling error handler", err_type, source_name)
+            asyncio.create_task(
+                _handle_agent_error(
+                    session,
+                    ctx.room,
+                    err or err_type,
+                    reason=f"session_error:{err_type}",
+                    anchor_name=anchor_name,
+                    source=source_name,
+                )
+            )
         except Exception:
             logger.exception("session error handler failed")
 
     session.on("error", _on_session_error)
 
-    await session.start(agent=agent, room=ctx.room)
+    # ── Transcript relay for custom mobile clients ────────────────────────────
+    # LiveKit lk.transcription sends CUMULATIVE partial text per stream id —
+    # clients must REPLACE by itemId/streamId, NOT append. We only mirror
+    # FINAL lines on the data channel to avoid duplicate walls of text.
+    _TRANSCRIPT_TOPIC = "genzcine_transcript"
+    _published_transcript_ids: set[str] = set()
+    _agent_turn_index = 0
+
+    async def _publish_transcript(
+        *,
+        role: str,
+        text: str,
+        is_final: bool = True,
+        item_id: str = "",
+        turn_index: int | None = None,
+    ) -> None:
+        clean = text.strip()
+        if not clean:
+            return
+        # Skip partial STT — only finals. Partials caused append bugs on mobile UIs.
+        if not is_final:
+            return
+        dedupe_key = item_id or f"{role}:{turn_index}:{clean[:80]}"
+        if dedupe_key in _published_transcript_ids:
+            return
+        _published_transcript_ids.add(dedupe_key)
+        try:
+            event = {
+                "type": "transcript",
+                "role": role,
+                "text": clean,
+                "isFinal": True,
+                "itemId": item_id or dedupe_key,
+                "turnIndex": turn_index,
+                # Clients: REPLACE caption for this itemId; never append partials.
+                "updateMode": "replace",
+                "timestamp": time.time(),
+            }
+            await ctx.room.local_participant.publish_data(
+                json.dumps(event).encode(), reliable=True, topic=_TRANSCRIPT_TOPIC
+            )
+            await publish_studio_event(ctx.room, event)
+        except Exception:
+            logger.exception("transcript publish failed")
+
+    def _on_user_input_transcribed(ev) -> None:
+        try:
+            if not ev.is_final:
+                return
+            asyncio.create_task(
+                _publish_transcript(
+                    role="user",
+                    text=ev.transcript,
+                    is_final=True,
+                    item_id=ev.item_id or "",
+                )
+            )
+        except Exception:
+            logger.exception("_on_user_input_transcribed error")
+
+    def _on_conversation_item_added(ev) -> None:
+        nonlocal _agent_turn_index
+        try:
+            if _skip_agent_transcript.get(ctx.room.name):
+                return  # error apology — UI uses agent_error event, not chat bubble
+            item = ev.item
+            role = getattr(item, "role", None)
+            if role != "assistant":
+                return
+            text = getattr(item, "raw_text_content", None) or ""
+            item_id = getattr(item, "id", "") or ""
+            _agent_turn_index += 1
+            asyncio.create_task(
+                _publish_transcript(
+                    role="agent",
+                    text=text,
+                    is_final=True,
+                    item_id=item_id,
+                    turn_index=_agent_turn_index,
+                )
+            )
+        except Exception:
+            logger.exception("_on_conversation_item_added error")
+
+    session.on("user_input_transcribed", _on_user_input_transcribed)
+    session.on("conversation_item_added", _on_conversation_item_added)
+
+    await session.start(
+        agent=agent,
+        room=ctx.room,
+        room_options=room_io.RoomOptions(
+            # False = emit full agent lines once (fewer partial chunks on lk.transcription).
+            # Mobile clients that append instead of replace by streamId break with partials.
+            text_output=room_io.TextOutputOptions(sync_transcription=False),
+        ),
+    )
+
+    await publish_studio_event(
+        ctx.room,
+        {
+            "type": "agent_ready",
+            "mode": "live",
+            "anchorName": anchor_name,
+            "language": language,
+            "sessionType": session_type,
+            "title": "You're live with " + anchor_name,
+            "message": "Your AI news anchor is ready. Say hello or wait for today's headlines.",
+        },
+    )
+
+    await publish_studio_event(
+        ctx.room,
+        {
+            "type": "studio_state",
+            "mode": "live",
+            "anchorName": anchor_name,
+            "language": language,
+            "sessionType": session_type,
+        },
+    )
+
+    # ── Continuous broadcast auto-continue ────────────────────────────────────
+    # When the anchor finishes a headline, immediately queue the next one unless
+    # the viewer is speaking or a video clip is playing.
+    _broadcast_active = True
+    _user_state = "listening"
+    _continue_task: asyncio.Task | None = None
+    _continue_failures = 0
+
+    async def _schedule_broadcast_continue(
+        *, delay: float = HEADLINE_CONTINUE_SECONDS
+    ) -> None:
+        nonlocal _continue_task, _continue_failures, _broadcast_active
+        if _continue_task and not _continue_task.done():
+            _continue_task.cancel()
+
+        async def _go() -> None:
+            nonlocal _continue_failures, _broadcast_active
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+            if (
+                not _broadcast_active
+                or agent._video_playing
+                or not ctx.room.isconnected()
+                or _user_state == "speaking"
+            ):
+                return
+            ok = await agent._deliver_headline_via_tts(is_first=False)
+            if ok:
+                _continue_failures = 0
+            else:
+                _continue_failures += 1
+                if _continue_failures >= 3:
+                    _broadcast_active = False
+                    logger.warning("broadcast auto-continue disabled after repeated failures")
+                    try:
+                        await session.say(
+                            "That's the latest for now — ask me about any story anytime.",
+                            allow_interruptions=True,
+                        )
+                    except Exception:
+                        pass
+
+        _continue_task = asyncio.create_task(_go())
+
+    def _on_agent_state_changed(ev) -> None:
+        try:
+            if ev.old_state == "speaking" and ev.new_state in ("listening", "idle"):
+                asyncio.create_task(_schedule_broadcast_continue())
+        except Exception:
+            logger.exception("_on_agent_state_changed error")
+
+    def _on_user_state_changed(ev) -> None:
+        nonlocal _user_state
+        try:
+            _user_state = ev.new_state
+            if ev.new_state == "speaking" and _continue_task and not _continue_task.done():
+                _continue_task.cancel()
+        except Exception:
+            logger.exception("_on_user_state_changed error")
+
+    session.on("agent_state_changed", _on_agent_state_changed)
+    session.on("user_state_changed", _on_user_state_changed)
 
     # ── News video data channel ─────────────────────────────────────────────
     _video_reply_at: dict[str, float] = {}  # topic -> last reply time (dedup in group rooms)
 
     async def _respond_to_video_end(topic: str, skipped: bool) -> None:
         try:
+            agent._video_playing = False
+            await publish_studio_event(
+                ctx.room,
+                {
+                    "type": "video_end",
+                    "topic": topic,
+                    "skipped": skipped,
+                },
+            )
+            await publish_studio_event(
+                ctx.room,
+                {"type": "studio_state", "mode": "live", "anchorName": anchor_name},
+            )
             if skipped:
-                await _safe_generate_reply(
-                    session,
-                    instructions=(
-                        f"The viewer skipped the video on '{topic}' before it finished. "
-                        "That is fine — do not make a fuss about it. Briefly move on and "
-                        "continue the broadcast."
-                    ),
-                    fallback_reason="video_skipped",
+                await session.say(
+                    "No problem — let's keep going with the news.",
+                    allow_interruptions=True,
                 )
             else:
-                await _safe_generate_reply(
-                    session,
-                    instructions=(
-                        f"The video clip on '{topic}' just finished playing. React briefly to "
-                        "what it showed, then continue the broadcast — ask if the viewer wants "
-                        "more on this story or a different topic."
-                    ),
-                    fallback_reason="video_ended",
+                await session.say(
+                    f"That was the clip on {topic}. Want more on that, or the next headline?",
+                    allow_interruptions=True,
                 )
-        except Exception:
+            asyncio.create_task(
+                _schedule_broadcast_continue(delay=HEADLINE_CONTINUE_SECONDS)
+            )
+        except Exception as exc:
             logger.exception("video end reply failed")
-            await _say_busy_fallback(session, reason="video_end_exception")
+            await _handle_agent_error(
+                session, ctx.room, exc, reason="video_end_exception", anchor_name=anchor_name
+            )
 
     def on_data_received(data_packet: rtc.DataPacket) -> None:
         try:
@@ -504,33 +907,18 @@ async def my_agent(ctx: JobContext) -> None:
             warn_at = max(0, trial_seconds - 60)
             if warn_at > 0:
                 await asyncio.sleep(warn_at)
-                if not session.is_closed:
+                if ctx.room.isconnected():
                     try:
-                        await session.generate_reply(
-                            instructions=(
-                                "You have about 60 seconds left in the free trial session. "
-                                "Warmly let the viewer know time is almost up, summarize the one "
-                                "key story they cared about today, and encourage them to upgrade "
-                                "to GenzCine Premium at genzcine dot com for unlimited daily "
-                                "live news."
-                            )
-                        )
+                        await session.say(_TRIAL_WARN_SAY, allow_interruptions=True)
                     except Exception:
                         pass
                 await asyncio.sleep(60)
             else:
                 await asyncio.sleep(trial_seconds)
 
-            if not session.is_closed:
+            if ctx.room.isconnected():
                 try:
-                    await session.generate_reply(
-                        instructions=(
-                            "The free trial session has ended. Thank the viewer warmly, tell "
-                            "them it was great catching up on the news together, and direct "
-                            "them to genzcine dot com to unlock Premium for unlimited access. "
-                            "Say goodbye kindly."
-                        )
-                    )
+                    await session.say(_TRIAL_END_SAY, allow_interruptions=True)
                     await asyncio.sleep(8)
                 except Exception:
                     pass

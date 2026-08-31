@@ -24,13 +24,15 @@ services:
       LLAMA_CTX_SIZE: ${LLAMA_CTX_SIZE:-16384}
       LLAMA_N_GPU_LAYERS: ${LLAMA_N_GPU_LAYERS:-0}
       DEVICE: ${DEVICE:-cpu}
+      FRONTEND_DIR: /app/frontend/out
+      SIMLI_LIVEKIT_URL: ${SIMLI_LIVEKIT_URL}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://news.200.234.41.50.sslip.io}
     ports:
       - "${HOST_WEB_PORT:-${WEB_PORT:-8080}}:8080"
-      - "${HOST_LIVEKIT_PORT:-${LIVEKIT_BIND_PORT:-7880}}:7880"
-      - "${HOST_LIVEKIT_RTC_PORT:-${LIVEKIT_RTC_PORT:-7881}}:7881"
-      # WebRTC media over UDP. The host port must equal the container port
-      # because LiveKit advertises this exact port in its ICE candidates.
-      - "${HOST_LIVEKIT_UDP_PORT:-${LIVEKIT_UDP_PORT:-7882}}:7882/udp"
+      - "${LIVEKIT_BIND_PORT:-7880}:${LIVEKIT_BIND_PORT:-7880}"
+      - "${LIVEKIT_RTC_PORT:-7881}:${LIVEKIT_RTC_PORT:-7881}"
+      # WebRTC media over UDP. Host port must equal container port (ICE candidates).
+      - "${LIVEKIT_UDP_PORT:-7882}:${LIVEKIT_UDP_PORT:-7882}/udp"
     volumes:
       - models:/models
     healthcheck:
