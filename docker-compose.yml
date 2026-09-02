@@ -17,14 +17,11 @@ services:
       LIVEKIT_URL: ${LIVEKIT_URL:-ws://127.0.0.1:7880}
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-secret}
-      STT_PROVIDER: ${STT_PROVIDER:-nemotron}
+      STT_PROVIDER: ${STT_PROVIDER:-groq}
       LLAMA_HF_REPO: ${LLAMA_HF_REPO:-unsloth/Qwen3-4B-Instruct-2507-GGUF}
-      LLAMA_MODEL: ${LLAMA_MODEL:-qwen3-4b}
-      LLAMA_MODEL_ALIAS: ${LLAMA_MODEL_ALIAS:-qwen3-4b}
       LLAMA_CTX_SIZE: ${LLAMA_CTX_SIZE:-16384}
       LLAMA_N_GPU_LAYERS: ${LLAMA_N_GPU_LAYERS:-0}
       DEVICE: ${DEVICE:-cpu}
-      FRONTEND_DIR: /app/frontend/out
       SIMLI_LIVEKIT_URL: ${SIMLI_LIVEKIT_URL}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://news.200.234.41.50.sslip.io}
     ports:

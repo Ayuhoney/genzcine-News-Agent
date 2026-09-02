@@ -79,8 +79,8 @@ BULLETIN_RESUME_AFTER_USER_SECONDS = float(os.getenv("BULLETIN_RESUME_AFTER_USER
 # can ask follow-ups. Timer resets on each new final STT line.
 CONVERSATION_IDLE_SECONDS = float(os.getenv("CONVERSATION_IDLE_SECONDS", "12"))
 REPLY_NUDGE_RETRIES = max(1, int(os.getenv("REPLY_NUDGE_RETRIES", "3")))
-REPLY_NUDGE_DELAY_SECONDS = float(os.getenv("REPLY_NUDGE_DELAY_SECONDS", "1.2"))
-REPLY_NUDGE_RETRY_GAP_SECONDS = float(os.getenv("REPLY_NUDGE_RETRY_GAP_SECONDS", "2.0"))
+REPLY_NUDGE_DELAY_SECONDS = float(os.getenv("REPLY_NUDGE_DELAY_SECONDS", "0.8"))
+REPLY_NUDGE_RETRY_GAP_SECONDS = float(os.getenv("REPLY_NUDGE_RETRY_GAP_SECONDS", "1.5"))
 _HEADLINE_BRIDGES = (
     "Next up in today's news.",
     "Also making headlines.",
@@ -122,7 +122,8 @@ ON-AIR STYLE:
 - If the viewer interrupts during a headline, stop and respond — headlines resume only after they go quiet.
 - Voice only — no bullets, emojis, or lists read verbatim.
 
-TRIAL (5 min): open strong with headlines; near 4 min mention genzcine dot com for unlimited access.
+TRIAL (10 min): open strong with headlines; near 9 min mention genzcine dot com for unlimited access.
+IMPORTANT: Respond immediately and naturally — do NOT add <think> blocks, reasoning steps, or internal monologue. Spoken output only.
 """
 
 # Session languages — Kokoro TTS lang codes: a/b (English), e, f, h, i, j, p, z.
@@ -609,8 +610,8 @@ async def my_agent(ctx: JobContext) -> None:
                 "false_interruption_timeout": 1.5,
             },
             "endpointing": {
-                "min_delay": 0.35,
-                "max_delay": 2.5,
+                "min_delay": 0.25,
+                "max_delay": 1.8,
             },
             "preemptive_generation": {
                 "enabled": True,

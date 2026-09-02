@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.6
 #
-# Production image: LiveKit + agent + Kokoro TTS + static Next.js frontend.
+# Production image: LiveKit + voice agent + Kokoro TTS (API-only; phone clients connect).
 #
 # Build args:
 #   --build-arg LLAMA_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda  (for GPU)
@@ -9,17 +9,6 @@
 ARG LLAMA_IMAGE=ghcr.io/ggml-org/llama.cpp:server
 ARG LIVEKIT_IMAGE=livekit/livekit-server:latest
 ARG PYTHON_BASE=python:3.11-slim
-ARG NODE_IMAGE=node:22-bookworm-slim
-
-# ---------------- frontend (static export) ----------------
-FROM ${NODE_IMAGE} AS frontend
-WORKDIR /frontend
-RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
-COPY frontend/ ./
-ENV NODE_ENV=production
-RUN pnpm build
 
 # ---------------- binary sources ----------------
 FROM ${LLAMA_IMAGE} AS llama-bin
@@ -32,8 +21,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTORCH_ENABLE_MPS_FALLBACK=1 \
     HF_HOME=/models \
-    XDG_CACHE_HOME=/models \
-    FRONTEND_DIR=/app/frontend/out
+    XDG_CACHE_HOME=/models
 
 # System libs needed by the inference stack and the binaries
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -74,8 +62,6 @@ RUN python -m spacy download en_core_web_sm || true
 COPY local_voice_ai ./local_voice_ai
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-deps .
-
-COPY --from=frontend /frontend/out /app/frontend/out
 
 COPY --from=llama-bin /app/ /usr/local/lib/llama/
 RUN ln -s /usr/local/lib/llama/llama-server /usr/local/bin/llama-server \

@@ -13,6 +13,7 @@ The model is loaded once at startup and reused across requests.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import io
 import logging
 import os
@@ -158,7 +159,10 @@ async def speech(req: SpeechRequest) -> Response:
 
     voice = req.voice or DEFAULT_VOICE
     try:
-        audio = _synthesize(req.input, voice, float(req.speed or 1.0))
+        loop = asyncio.get_event_loop()
+        audio = await loop.run_in_executor(
+            None, _synthesize, req.input, voice, float(req.speed or 1.0)
+        )
     except Exception as exc:
         logger.exception("synthesis failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -197,6 +201,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Kokoro TTS Server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8880)
+    parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    if args.workers > 1:
+        uvicorn.run(
+            "local_voice_ai.services.kokoro.server:app",
+            host=args.host,
+            port=args.port,
+            workers=args.workers,
+            timeout_keep_alive=30,
+            loop="uvloop",
+        )
+    else:
+        uvicorn.run(app, host=args.host, port=args.port, timeout_keep_alive=30)

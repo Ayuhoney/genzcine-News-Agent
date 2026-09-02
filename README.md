@@ -1,9 +1,6 @@
 <div align="center">
-  <img src="./frontend/.github/assets/template-light.webp" alt="App Icon" width="80" />
-  <h1>Local Voice AI</h1>
-  <p>This project's goal is to enable anyone to easily build a powerful, private, local voice AI agent.</p>
-  <p>A real-time voice AI assistant — STT, LLM, TTS — running in <strong>one container</strong>, supervised by a single Python parent process. Powered by <a href="https://docs.livekit.io/agents?utm_source=local-voice-ai">LiveKit Agents</a>.</p>
-  <p>To keep up with what I'm building or request new features <a href="https://x.com/intent/follow?screen_name=ShayneParlo">send me a DM on X</a></p>
+  <h1>GenzCine News Agent</h1>
+  <p>Real-time voice news agent — STT, LLM, TTS, Simli avatar — running in <strong>one container</strong>. Phone / custom UIs connect via LiveKit; this repo is the agent brain + API.</p>
 </div>
 
 ## Overview
@@ -15,9 +12,9 @@ Everything runs as managed children of one Python supervisor (`python -m local_v
 - **Nemotron STT** or **Whisper (vox-box)** — Python uvicorn child, OpenAI-compatible.
 - **Kokoro TTS** — Python uvicorn child, OpenAI-compatible.
 - **LiveKit Agents worker** — the orchestrator child.
-- **FastAPI** in the supervisor itself, serving `POST /api/connection-details` (token minting) and the statically-exported Next.js frontend.
+- **FastAPI** in the supervisor itself, serving `POST /api/connection-details` (token minting) and session APIs for phone clients.
 
-Children speak HTTP only over `127.0.0.1`. The image exposes three ports: `8080` (web), `7880`, `7881` (LiveKit WebRTC, only if running locally).
+Children speak HTTP only over `127.0.0.1`. The image exposes ports: `8080` (API), plus LiveKit WebRTC ports when running locally.
 
 ## Getting started
 
@@ -25,9 +22,9 @@ Children speak HTTP only over `127.0.0.1`. The image exposes three ports: `8080`
 docker compose up --build
 ```
 
-Open <http://localhost:8080> and click the start button.
+Phone / client apps call `POST /api/connection-details`, then join LiveKit with the returned token.
 
-The first build pulls upstream binaries (llama-server, livekit-server) and downloads the Nemotron + LLM weights on first request — expect tens of GB on first boot.
+The first build pulls upstream binaries (llama-server, livekit-server) and downloads model weights on first request — expect a large first boot.
 
 ### GPU (NVIDIA)
 
@@ -59,14 +56,11 @@ The supervisor logs which children it manages on startup.
 ## Local development (no Docker)
 
 ```bash
-# Python side
 uv pip install -e ".[ml,dev]"
 python -m local_voice_ai serve
-
-# Frontend side, in another shell (only needed if you're editing the UI)
-cd frontend && pnpm install && pnpm run dev
 ```
 
+Phone UI lives in a separate app repo — connect it to this server's `/api/connection-details` + LiveKit URL.
 ## Architecture
 
 ```
@@ -80,7 +74,8 @@ cd frontend && pnpm install && pnpm run dev
 │  ├── child: livekit-agents worker                                │
 │  └── in-process: FastAPI on :8080                                 │
 │        ├── POST /api/connection-details  (token minting)         │
-│        └── GET  /*                       (static frontend)       │
+│        ├── POST /api/session/end                                 │
+│        └── GET  /healthz                                         │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -92,12 +87,11 @@ cd frontend && pnpm install && pnpm run dev
 │  ├─ __main__.py          # python -m local_voice_ai serve
 │  ├─ supervisor.py        # async process supervisor
 │  ├─ config.py            # env-driven config + manage-X flags
-│  ├─ api.py               # FastAPI: token route + static frontend
+│  ├─ api.py               # FastAPI: token + session APIs
 │  ├─ agent.py             # LiveKit Agents worker
 │  └─ services/
 │     ├─ nemotron/server.py
 │     └─ kokoro/server.py
-├─ frontend/               # Next.js (configured for static export)
 ├─ Dockerfile              # multi-stage build
 ├─ docker-compose.yml      # one service
 └─ pyproject.toml          # one Python package, one venv

@@ -4,7 +4,7 @@ The default ``serve`` command:
   1. Builds child specs based on the config (skipping any service whose base
      URL is external).
   2. Spawns all children, waits for readiness.
-  3. Starts the FastAPI app (token route + static frontend) on the same loop.
+  3. Starts the FastAPI app (token + session APIs for phone clients) on the same loop.
   4. Blocks on SIGTERM/SIGINT, then shuts everything down cleanly.
 """
 
@@ -121,6 +121,9 @@ def _build_specs(cfg: Config) -> list[ChildSpec]:
 
     # --- TTS (Kokoro) ------------------------------------------------
     if cfg.manage_tts:
+        import multiprocessing
+        # One worker per CPU core — fully saturate the VPS for max TTS concurrency.
+        tts_workers = max(1, multiprocessing.cpu_count())
         specs.append(
             ChildSpec(
                 name="kokoro",
@@ -128,6 +131,7 @@ def _build_specs(cfg: Config) -> list[ChildSpec]:
                     py, "-m", "local_voice_ai.services.kokoro.server",
                     "--host", "127.0.0.1",
                     "--port", str(cfg.tts_bind_port),
+                    "--workers", str(tts_workers),
                 ],
                 ready_url=f"http://127.0.0.1:{cfg.tts_bind_port}/v1/models",
                 ready_timeout=600.0,

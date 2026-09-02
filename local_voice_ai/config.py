@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 from urllib.parse import urlparse
 
 
@@ -38,7 +37,6 @@ class Config:
     # --- Web (FastAPI in the supervisor process) -------------------------
     web_host: str = "0.0.0.0"
     web_port: int = 8080
-    frontend_dir: Optional[str] = None  # path to a Next.js static export dir
 
     # --- LiveKit ---------------------------------------------------------
     livekit_url: str = "ws://127.0.0.1:7880"
@@ -131,7 +129,6 @@ class Config:
         return cls(
             web_host=os.getenv("WEB_HOST", cls.web_host),
             web_port=int(os.getenv("WEB_PORT", str(cls.web_port))),
-            frontend_dir=os.getenv("FRONTEND_DIR"),
             #
             livekit_url=livekit_url,
             livekit_api_key=os.getenv("LIVEKIT_API_KEY", cls.livekit_api_key),

@@ -16,8 +16,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from livekit import api as lk_api
 from livekit.protocol.room import RoomConfiguration
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -39,7 +38,7 @@ from .services.user_service import (
     save_participant_name,
 )
 
-TRIAL_SECONDS = 300  # 5-minute free trial
+TRIAL_SECONDS = 600  # 10-minute free trial
 
 logger = logging.getLogger("api")
 
@@ -650,12 +649,12 @@ def build_app(cfg: Config) -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    # ── Frontend error reporting ───────────────────────────────────────────────
-    _fe_log = logging.getLogger("frontend")
+    # ── Client error reporting (phone / web UIs) ───────────────────────────────
+    _client_log = logging.getLogger("client")
 
     @app.post("/api/log")
-    async def frontend_log(request: Request) -> JSONResponse:
-        """Receive client-side errors from the frontend."""
+    async def client_log(request: Request) -> JSONResponse:
+        """Receive client-side errors from phone or other UIs."""
         try:
             body = await request.json()
         except Exception:
@@ -665,26 +664,22 @@ def build_app(cfg: Config) -> FastAPI:
         context = str(body.get("context", ""))[:300]
         ip      = _client_ip(request)
         if level == "warn":
-            _fe_log.warning("client %s — %s %s", ip, message, context)
+            _client_log.warning("client %s — %s %s", ip, message, context)
         elif level == "info":
-            _fe_log.info("client %s — %s %s", ip, message, context)
+            _client_log.info("client %s — %s %s", ip, message, context)
         else:
-            _fe_log.error("client %s — %s %s", ip, message, context)
+            _client_log.error("client %s — %s %s", ip, message, context)
         return JSONResponse({"ok": True})
 
-    # ── Static SPA ────────────────────────────────────────────────────────────
-
-    if cfg.frontend_dir:
-        static = StaticFiles(directory=cfg.frontend_dir, html=True)
-
-        # LiveKit JS prepareConnection() sends HEAD to the serverUrl origin.
-        @app.api_route("/{path:path}", methods=["GET", "HEAD"])
-        async def spa(path: str, request: Request) -> Any:
-            if request.method == "HEAD":
-                return Response(status_code=200)
-            try:
-                return await static.get_response(path or "index.html", request.scope)
-            except Exception:
-                return FileResponse(f"{cfg.frontend_dir}/index.html")
+    # LiveKit clients may probe the origin with HEAD/GET before connecting.
+    @app.api_route("/", methods=["GET", "HEAD"])
+    async def root() -> JSONResponse:
+        return JSONResponse(
+            {
+                "service": "genzcine-news-agent",
+                "status": "ok",
+                "docs": "API only — connect via /api/connection-details",
+            }
+        )
 
     return app

@@ -1,12 +1,9 @@
-"""Tests for the FastAPI app: token minting + static frontend serving."""
+"""Tests for the FastAPI app: token minting and API routes."""
 
 from __future__ import annotations
 
 import base64
 import json
-import pathlib
-import tempfile
-from typing import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
@@ -39,6 +36,11 @@ class TestHealth:
         assert r.status_code == 200
         assert r.json() == {"status": "ok"}
 
+    def test_root_returns_api_only(self, client: TestClient) -> None:
+        r = client.get("/")
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+
 
 class TestCors:
     def test_head_root_allows_localhost_dev_origin(self, client: TestClient) -> None:
@@ -48,6 +50,7 @@ class TestCors:
         )
         assert r.status_code == 200
         assert r.headers.get("access-control-allow-origin") == "http://localhost:5174"
+
 
 class TestConnectionDetails:
     def test_mints_token_with_empty_body(self, client: TestClient) -> None:
@@ -95,7 +98,6 @@ class TestConnectionDetails:
         assert "roomConfig" in payload
 
     def test_malformed_body_still_returns_a_token(self, client: TestClient) -> None:
-        # The Next.js route swallowed JSON errors silently; ours should too.
         r = client.post("/api/connection-details", content=b"not json")
         assert r.status_code == 200
 
@@ -104,47 +106,3 @@ class TestConnectionDetails:
         # Random ints in [0, 9999] → collisions are statistically possible but rare;
         # we want at least most of the rooms to be unique.
         assert len(rooms) >= 6
-
-
-class TestStaticFrontend:
-    @pytest.fixture
-    def frontend_dir(self) -> Iterator[pathlib.Path]:
-        with tempfile.TemporaryDirectory() as td:
-            out = pathlib.Path(td)
-            (out / "index.html").write_text("<h1>HOME</h1>")
-            (out / "favicon.ico").write_bytes(b"\x00\x00")
-            (out / "_next").mkdir()
-            (out / "_next" / "static.js").write_text("// stub")
-            yield out
-
-    @pytest.fixture
-    def client(self, monkeypatch: pytest.MonkeyPatch, frontend_dir: pathlib.Path) -> TestClient:
-        monkeypatch.setenv("LIVEKIT_API_KEY", "devkey")
-        monkeypatch.setenv("LIVEKIT_API_SECRET", "secret-secret-secret-thirty-two-chars")
-        monkeypatch.setenv("FRONTEND_DIR", str(frontend_dir))
-        return TestClient(build_app(Config.from_env()))
-
-    def test_serves_index(self, client: TestClient) -> None:
-        r = client.get("/")
-        assert r.status_code == 200
-        assert "HOME" in r.text
-
-    def test_serves_static_asset(self, client: TestClient) -> None:
-        r = client.get("/_next/static.js")
-        assert r.status_code == 200
-        assert "stub" in r.text
-
-    def test_spa_fallback_for_unknown_route(self, client: TestClient) -> None:
-        r = client.get("/some/client-side/route")
-        assert r.status_code == 200
-        assert "HOME" in r.text
-
-    def test_api_route_still_wins_over_spa_fallback(self, client: TestClient) -> None:
-        r = client.post("/api/connection-details", json={})
-        assert r.status_code == 200
-        assert "participantToken" in r.json()
-
-    def test_healthz_still_wins_over_spa_fallback(self, client: TestClient) -> None:
-        r = client.get("/healthz")
-        assert r.status_code == 200
-        assert r.json() == {"status": "ok"}
