@@ -70,8 +70,11 @@ def _llm_client_options() -> dict:
 
 
 NEWS_HEADLINE_LIMIT = int(os.getenv("NEWS_HEADLINE_LIMIT", "8"))
-# Beat between auto headlines after TTS ends. ~1.2s = news-studio pace (not a long pause).
-HEADLINE_CONTINUE_SECONDS = float(os.getenv("HEADLINE_CONTINUE_SECONDS", "1.2"))
+# 0 = next headline starts as soon as the anchor finishes the previous one.
+HEADLINE_CONTINUE_SECONDS = float(os.getenv("HEADLINE_CONTINUE_SECONDS", "0"))
+# After the viewer stops speaking, wait this long for the agent to respond before
+# resuming the bulletin (covers STT + endpointing when they said nothing meaningful).
+BULLETIN_RESUME_AFTER_USER_SECONDS = float(os.getenv("BULLETIN_RESUME_AFTER_USER_SECONDS", "3.5"))
 _HEADLINE_BRIDGES = (
     "Next up in today's news.",
     "Also making headlines.",
@@ -570,6 +573,8 @@ async def my_agent(ctx: JobContext) -> None:
         face_id, voice, trial_seconds, language, anchor_name,
     )
 
+    # Simli routes TTS through DataStreamIO — audio pause/resume is not supported.
+    _use_simli = bool(SIMLI_API_KEY and face_id)
     session = AgentSession(
         stt=openai.STT(base_url=STT_BASE_URL, model=STT_MODEL, api_key=STT_API_KEY),
         llm=openai.LLM(
@@ -584,9 +589,10 @@ async def my_agent(ctx: JobContext) -> None:
         turn_handling={
             "interruption": {
                 "enabled": True,
-                "min_duration": 0.35,
+                "min_duration": 0.25,
                 "min_words": 0,
-                "resume_false_interruption": True,
+                # Simli avatar cannot pause mid-utterance; rely on session.interrupt().
+                "resume_false_interruption": not _use_simli,
                 "false_interruption_timeout": 1.5,
             },
             "endpointing": {
@@ -595,12 +601,12 @@ async def my_agent(ctx: JobContext) -> None:
             },
             "preemptive_generation": {
                 "enabled": True,
-                "preemptive_tts": True,
+                "preemptive_tts": not _use_simli,
             },
         },
     )
 
-    if SIMLI_API_KEY and face_id:
+    if _use_simli:
         try:
             simli_avatar = simli.AvatarSession(
                 simli_config=simli.SimliConfig(
@@ -665,6 +671,18 @@ async def my_agent(ctx: JobContext) -> None:
     _TRANSCRIPT_TOPIC = "genzcine_transcript"
     _published_transcript_ids: set[str] = set()
     _agent_turn_index = 0
+    # Shared broadcast + user-turn state (handlers below mutate this dict).
+    _bc: dict[str, Any] = {
+        "active": True,
+        "paused": False,
+        "user_state": "listening",
+        "user_turn_active": False,
+        "agent_responding_to_user": False,
+        "continue_task": None,
+        "resume_task": None,
+        "reply_nudge_task": None,
+        "failures": 0,
+    }
 
     async def _publish_transcript(
         *,
@@ -703,10 +721,44 @@ async def my_agent(ctx: JobContext) -> None:
         except Exception:
             logger.exception("transcript publish failed")
 
+    async def _nudge_user_reply(transcript: str) -> None:
+        """If LiveKit didn't start a reply after STT, trigger one explicitly."""
+        clean = transcript.strip()
+        if not clean:
+            return
+        try:
+            await asyncio.sleep(1.2)
+        except asyncio.CancelledError:
+            return
+        if (
+            not _bc["paused"]
+            or not _bc["user_turn_active"]
+            or _bc["agent_responding_to_user"]
+            or _bc["user_state"] == "speaking"
+            or session.agent_state == "speaking"
+        ):
+            return
+        logger.info("mic picked up — nudging agent reply: %r", clean[:120])
+        try:
+            await session.generate_reply(user_input=clean, allow_interruptions=True)
+            _bc["agent_responding_to_user"] = True
+        except Exception:
+            logger.exception("generate_reply nudge failed")
+
+    def _cancel_reply_nudge() -> None:
+        task = _bc.get("reply_nudge_task")
+        if task and not task.done():
+            task.cancel()
+
     def _on_user_input_transcribed(ev) -> None:
         try:
             if not ev.is_final:
                 return
+            text = (ev.transcript or "").strip()
+            if text:
+                logger.info("mic STT final: %r", text[:120])
+                _bc["user_turn_active"] = True
+                _bc["paused"] = True
             asyncio.create_task(
                 _publish_transcript(
                     role="user",
@@ -715,6 +767,9 @@ async def my_agent(ctx: JobContext) -> None:
                     item_id=ev.item_id or "",
                 )
             )
+            if text:
+                _cancel_reply_nudge()
+                _bc["reply_nudge_task"] = asyncio.create_task(_nudge_user_reply(text))
         except Exception:
             logger.exception("_on_user_input_transcribed error")
 
@@ -780,40 +835,36 @@ async def my_agent(ctx: JobContext) -> None:
     )
 
     # ── Continuous broadcast auto-continue ────────────────────────────────────
-    # When the anchor finishes a headline, immediately queue the next one unless
-    # the viewer is speaking or a video clip is playing.
-    _broadcast_active = True
-    _user_state = "listening"
-    _continue_task: asyncio.Task | None = None
-    _continue_failures = 0
-
-    async def _schedule_broadcast_continue(
-        *, delay: float = HEADLINE_CONTINUE_SECONDS
-    ) -> None:
-        nonlocal _continue_task, _continue_failures, _broadcast_active
-        if _continue_task and not _continue_task.done():
-            _continue_task.cancel()
+    # Headlines run back-to-back. When the viewer speaks, pause the bulletin,
+    # let STT + LLM answer, then resume headlines once the reply finishes.
+    async def _continue_bulletin(*, delay: float = HEADLINE_CONTINUE_SECONDS) -> None:
+        task = _bc.get("continue_task")
+        if task and not task.done():
+            task.cancel()
 
         async def _go() -> None:
-            nonlocal _continue_failures, _broadcast_active
             try:
-                await asyncio.sleep(delay)
+                if delay > 0:
+                    await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 return
             if (
-                not _broadcast_active
+                not _bc["active"]
+                or _bc["paused"]
+                or _bc["user_turn_active"]
                 or agent._video_playing
                 or not ctx.room.isconnected()
-                or _user_state == "speaking"
+                or _bc["user_state"] == "speaking"
+                or session.agent_state == "speaking"
             ):
                 return
             ok = await agent._deliver_headline_via_tts(is_first=False)
             if ok:
-                _continue_failures = 0
+                _bc["failures"] = 0
             else:
-                _continue_failures += 1
-                if _continue_failures >= 3:
-                    _broadcast_active = False
+                _bc["failures"] = int(_bc["failures"]) + 1
+                if _bc["failures"] >= 3:
+                    _bc["active"] = False
                     logger.warning("broadcast auto-continue disabled after repeated failures")
                     try:
                         await session.say(
@@ -823,23 +874,90 @@ async def my_agent(ctx: JobContext) -> None:
                     except Exception:
                         pass
 
-        _continue_task = asyncio.create_task(_go())
+        _bc["continue_task"] = asyncio.create_task(_go())
+
+    async def _resume_bulletin_after_user_turn() -> None:
+        try:
+            await asyncio.sleep(BULLETIN_RESUME_AFTER_USER_SECONDS)
+        except asyncio.CancelledError:
+            return
+        if (
+            not _bc["paused"]
+            or _bc["agent_responding_to_user"]
+            or _bc["user_state"] == "speaking"
+            or session.agent_state == "speaking"
+            or agent._video_playing
+        ):
+            return
+        logger.info("user quiet — resuming bulletin after no agent reply")
+        _bc["user_turn_active"] = False
+        _bc["paused"] = False
+        await _continue_bulletin()
+
+    def _cancel_resume_task() -> None:
+        task = _bc.get("resume_task")
+        if task and not task.done():
+            task.cancel()
 
     def _on_agent_state_changed(ev) -> None:
         try:
-            if ev.old_state == "speaking" and ev.new_state in ("listening", "idle"):
-                asyncio.create_task(_schedule_broadcast_continue())
+            if ev.new_state == "speaking" and _bc["paused"]:
+                _cancel_resume_task()
+                _cancel_reply_nudge()
+                if _bc["user_turn_active"]:
+                    _bc["agent_responding_to_user"] = True
+                    logger.info("agent responding to viewer")
+            elif ev.old_state == "speaking" and ev.new_state in ("listening", "idle"):
+                if _bc["user_turn_active"]:
+                    if _bc["agent_responding_to_user"]:
+                        logger.info("agent reply done — resuming bulletin")
+                        _bc["user_turn_active"] = False
+                        _bc["agent_responding_to_user"] = False
+                        _bc["paused"] = False
+                        asyncio.create_task(_continue_bulletin())
+                    # Headline was interrupted — wait for STT/reply, do not resume yet.
+                elif not _bc["paused"]:
+                    asyncio.create_task(_continue_bulletin())
         except Exception:
             logger.exception("_on_agent_state_changed error")
 
     def _on_user_state_changed(ev) -> None:
-        nonlocal _user_state
         try:
-            _user_state = ev.new_state
-            if ev.new_state == "speaking" and _continue_task and not _continue_task.done():
-                _continue_task.cancel()
+            _bc["user_state"] = ev.new_state
+            if ev.new_state == "speaking":
+                logger.info("viewer speaking — pausing bulletin")
+                _bc["user_turn_active"] = True
+                _bc["paused"] = True
+                _cancel_resume_task()
+                _cancel_reply_nudge()
+                task = _bc.get("continue_task")
+                if task and not task.done():
+                    task.cancel()
+                try:
+                    session.interrupt(force=True)
+                except Exception:
+                    logger.exception("session.interrupt failed while user speaking")
+            elif ev.new_state == "listening" and _bc["paused"] and _bc["user_turn_active"]:
+                _cancel_resume_task()
+                _bc["resume_task"] = asyncio.create_task(_resume_bulletin_after_user_turn())
         except Exception:
             logger.exception("_on_user_state_changed error")
+
+    def _on_remote_track_published(
+        publication: rtc.RemoteTrackPublication, participant: rtc.RemoteParticipant
+    ) -> None:
+        try:
+            if publication.kind == rtc.TrackKind.KIND_AUDIO:
+                logger.info(
+                    "remote mic track published: participant=%s source=%s muted=%s",
+                    participant.identity,
+                    publication.source,
+                    publication.muted,
+                )
+        except Exception:
+            logger.exception("_on_remote_track_published error")
+
+    ctx.room.on("track_published", _on_remote_track_published)
 
     session.on("agent_state_changed", _on_agent_state_changed)
     session.on("user_state_changed", _on_user_state_changed)
@@ -872,9 +990,7 @@ async def my_agent(ctx: JobContext) -> None:
                     f"That was the clip on {topic}. Next up in today's bulletin.",
                     allow_interruptions=True,
                 )
-            asyncio.create_task(
-                _schedule_broadcast_continue(delay=HEADLINE_CONTINUE_SECONDS)
-            )
+            asyncio.create_task(_continue_bulletin())
         except Exception as exc:
             logger.exception("video end reply failed")
             await _handle_agent_error(
