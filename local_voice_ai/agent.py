@@ -113,8 +113,13 @@ TOOLS (required):
 - get_latest_news: fetch real headlines. Call before reporting ANY current news. Never invent headlines.
 - play_news_video: show a YouTube clip on the viewer's device. Say one short intro line first; stay quiet until notified it ended.
 
+SESSION START:
+- You have already asked the viewer which city or region they want news for.
+- As soon as they answer (e.g. "Mohali", "Delhi", "national"), call get_latest_news with that location as the topic, then immediately start the bulletin — no further questions.
+- If they say something vague like "anything" or "you decide", call get_latest_news with topic="" for national headlines and start the bulletin.
+
 ON-AIR STYLE:
-- You are live in a news studio. After the intro, keep the bulletin going — do not wait for the viewer.
+- You are live in a news studio. After the location is set, keep the bulletin going — do not wait for the viewer.
 - Headlines play automatically one after another. When the viewer speaks, answer briefly (1-3 sentences).
 - After answering, stay ready for follow-ups — the viewer may ask another question before headlines resume.
 - End replies naturally when helpful, e.g. "Want to know more?" or "Anything else on that story?"
@@ -203,8 +208,9 @@ def _headline_spoken_line(
 
 
 async def _refresh_headlines(agent: "Assistant", *, topic: str = "") -> bool:
+    query = topic or agent._preferred_location or None
     articles = await fetch_latest_news(
-        query=topic or None,
+        query=query,
         language=agent._language,
         limit=NEWS_HEADLINE_LIMIT,
     )
@@ -308,6 +314,7 @@ class Assistant(Agent):
         self._video_playing = False
         self._last_headlines: list[dict] = []
         self._headline_index = 0
+        self._preferred_location: str = ""  # set by user at session start
 
         instructions = (
             _BASE_INSTRUCTIONS.format(anchor_name=anchor_name)
@@ -385,8 +392,10 @@ class Assistant(Agent):
             topic: Optional subject to search for (e.g. "technology", "cricket",
                 "stock market", "Bollywood"). Leave empty for general top headlines.
         """
+        if topic:
+            self._preferred_location = topic.strip()
         articles = await fetch_latest_news(
-            query=topic or None, language=self._language, limit=NEWS_HEADLINE_LIMIT
+            query=self._preferred_location or None, language=self._language, limit=NEWS_HEADLINE_LIMIT
         )
         if not articles:
             await self._publish_studio(
@@ -485,32 +494,23 @@ class Assistant(Agent):
             if self._session_type == "group":
                 count = len(participant_names)
                 name_list = ", ".join(participant_names) if participant_names else "everyone"
-                if await _refresh_headlines(self):
-                    greet = (
-                        f"Hey {name_list}! I'm {self._anchor_name}, live with GenzCine News "
-                        f"for our group of {count}. Here's what's happening right now."
-                    )
-                    await self.session.say(greet, allow_interruptions=True)
-                    await self._deliver_headline_via_tts(is_first=False)
-                else:
-                    await self.session.say(
-                        f"Hey {name_list}! I'm {self._anchor_name}. "
-                        "Headlines are loading — hang tight.",
-                        allow_interruptions=True,
-                    )
+                await self.session.say(
+                    f"Hey {name_list}! I'm {self._anchor_name}, live with GenzCine News "
+                    f"for our group of {count}. "
+                    "Which city or region would you like today's news for — "
+                    "local Punjab, Delhi, Mumbai, or national headlines?",
+                    allow_interruptions=True,
+                )
             else:
                 viewer_name = participant_names[0] if participant_names else None
-                if await _refresh_headlines(self):
-                    await self._deliver_headline_via_tts(
-                        is_first=True,
-                        viewer_name=viewer_name,
-                    )
-                else:
-                    await self.session.say(
-                        f"Hi! I'm {self._anchor_name}, your GenzCine news anchor. "
-                        "Great to have you in the studio — what would you like to hear about today?",
-                        allow_interruptions=True,
-                    )
+                who = f" {viewer_name}" if viewer_name else ""
+                await self.session.say(
+                    f"Hey{who}! I'm {self._anchor_name}, your GenzCine news anchor. "
+                    "Which city or region would you like today's news for? "
+                    "You can say something like Mohali, Delhi, Mumbai, Punjab — "
+                    "or just say 'national' for top headlines.",
+                    allow_interruptions=True,
+                )
         except Exception as exc:
             logger.exception("[%s] on_enter failed — attempting fallback greeting", self._session_type)
             await _handle_agent_error(
