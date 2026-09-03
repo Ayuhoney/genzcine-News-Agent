@@ -20,6 +20,7 @@ from livekit.agents import (
     function_tool,
     room_io,
 )
+from livekit.agents.tts import StreamAdapter
 from livekit.plugins import openai, silero, simli
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -589,6 +590,13 @@ async def my_agent(ctx: JobContext) -> None:
 
     # Simli routes TTS through DataStreamIO — audio pause/resume is not supported.
     _use_simli = bool(SIMLI_API_KEY and face_id)
+
+    # Kokoro TTS is blocking (returns full audio at once).
+    # StreamAdapter splits LLM output into sentences and fires parallel
+    # TTS calls so the first sentence plays while the rest are still generating.
+    raw_tts = openai.TTS(base_url=TTS_BASE_URL, model="tts-1", voice=voice, api_key=TTS_API_KEY)
+    streamed_tts = StreamAdapter(tts=raw_tts)
+
     session = AgentSession(
         stt=openai.STT(base_url=STT_BASE_URL, model=STT_MODEL, api_key=STT_API_KEY),
         llm=openai.LLM(
@@ -597,7 +605,7 @@ async def my_agent(ctx: JobContext) -> None:
             api_key=LLM_API_KEY,
             **LLM_OPTS,
         ),
-        tts=openai.TTS(base_url=TTS_BASE_URL, model="tts-1", voice=voice, api_key=TTS_API_KEY),
+        tts=streamed_tts,
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
         turn_handling={
@@ -1163,8 +1171,7 @@ async def my_agent(ctx: JobContext) -> None:
                 if now - _video_reply_at.get(topic, float("-inf")) < 60.0:
                     return
                 _video_reply_at[topic] = now
-                loop = asyncio.get_event_loop()
-                loop.create_task(_respond_to_video_end(topic, skipped))
+                asyncio.get_running_loop().create_task(_respond_to_video_end(topic, skipped))
         except Exception:
             logger.exception("on_data_received error")
 
