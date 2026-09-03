@@ -59,15 +59,73 @@ def _is_local_service_url(url: str) -> bool:
     return host in {"", "127.0.0.1", "localhost", "::1"}
 
 
+def _stt_language(language: str) -> str:
+    """Groq Whisper wants a short ISO code (en, hi), not a locale (en-US)."""
+    return (language or "en").split("-", 1)[0].lower() or "en"
+
+
 def _llm_client_options() -> dict:
-    """Cap completion length; local llama.cpp also needs a longer read timeout."""
+    """Voice-tuned Groq/OpenAI client: short replies, no thinking, sane timeouts."""
+    local = _is_local_service_url(LLM_BASE_URL)
+    read_s = float(os.getenv("LLM_READ_TIMEOUT", "120" if local else "30"))
     opts: dict = {
-        "max_completion_tokens": int(os.getenv("LLM_MAX_COMPLETION_TOKENS", "150")),
+        "max_completion_tokens": int(os.getenv("LLM_MAX_COMPLETION_TOKENS", "120")),
+        # qwen/qwen3.8-27b defaults to thinking mode on Groq — that burns the
+        # token budget before any spoken words. Instruct mode is required.
+        "reasoning_effort": os.getenv("LLM_REASONING_EFFORT", "none"),
+        "temperature": float(os.getenv("LLM_TEMPERATURE", "0.7")),
+        "timeout": httpx.Timeout(connect=10.0, read=read_s, write=15.0, pool=5.0),
     }
-    if _is_local_service_url(LLM_BASE_URL):
-        read_s = float(os.getenv("LLM_READ_TIMEOUT", "120"))
-        opts["timeout"] = httpx.Timeout(connect=15.0, read=read_s, write=30.0, pool=5.0)
+    if "groq.com" in (LLM_BASE_URL or ""):
+        opts["extra_body"] = {"reasoning_format": "hidden"}
     return opts
+
+
+def _build_tts(voice: str) -> StreamAdapter:
+    """Rampwalk-style StreamAdapter (sentence-level) + Kokoro PCM HTTP streaming.
+
+    Kokoro yields audio per clause. The server streams raw s16le as each clause
+    finishes; livekit openai.TTS already consumes the body with
+    with_streaming_response, so playback starts before the full line is done.
+    StreamAdapter then parallelizes the next LLM sentence on the second worker.
+    """
+    from openai import AsyncClient
+
+    client = AsyncClient(
+        api_key=TTS_API_KEY or "no-key-needed",
+        base_url=TTS_BASE_URL,
+        max_retries=0,
+        http_client=httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
+            follow_redirects=True,
+            limits=httpx.Limits(
+                max_connections=20,
+                max_keepalive_connections=10,
+                keepalive_expiry=120,
+            ),
+        ),
+    )
+    raw_tts = openai.TTS(
+        base_url=TTS_BASE_URL,
+        model="tts-1",
+        voice=voice,
+        api_key=TTS_API_KEY,
+        response_format="pcm",
+        client=client,
+    )
+    return StreamAdapter(tts=raw_tts)
+
+
+async def _warm_headline_cache(agent: "Assistant", query: str | None = None) -> None:
+    """Fetch in the background so the LLM tool call hits cache (saves one RTT)."""
+    try:
+        await fetch_latest_news(
+            query=query,
+            language=agent._language,
+            limit=NEWS_HEADLINE_LIMIT,
+        )
+    except Exception:
+        logger.exception("headline cache warm failed")
 
 
 NEWS_HEADLINE_LIMIT = int(os.getenv("NEWS_HEADLINE_LIMIT", "8"))
@@ -80,7 +138,7 @@ BULLETIN_RESUME_AFTER_USER_SECONDS = float(os.getenv("BULLETIN_RESUME_AFTER_USER
 # can ask follow-ups. Timer resets on each new final STT line.
 CONVERSATION_IDLE_SECONDS = float(os.getenv("CONVERSATION_IDLE_SECONDS", "12"))
 REPLY_NUDGE_RETRIES = max(1, int(os.getenv("REPLY_NUDGE_RETRIES", "3")))
-REPLY_NUDGE_DELAY_SECONDS = float(os.getenv("REPLY_NUDGE_DELAY_SECONDS", "0.8"))
+REPLY_NUDGE_DELAY_SECONDS = float(os.getenv("REPLY_NUDGE_DELAY_SECONDS", "2.0"))
 REPLY_NUDGE_RETRY_GAP_SECONDS = float(os.getenv("REPLY_NUDGE_RETRY_GAP_SECONDS", "1.5"))
 _HEADLINE_BRIDGES = (
     "Next up in today's news.",
@@ -121,9 +179,10 @@ SESSION START:
 
 ON-AIR STYLE:
 - You are live in a news studio. After the location is set, keep the bulletin going — do not wait for the viewer.
-- Headlines play automatically one after another. When the viewer speaks, answer briefly (1-3 sentences).
+- Headlines play automatically one after another. When the viewer speaks, answer in 1-2 short spoken sentences.
 - After answering, stay ready for follow-ups — the viewer may ask another question before headlines resume.
 - End replies naturally when helpful, e.g. "Want to know more?" or "Anything else on that story?"
+- Never narrate your plan, list options, or give a long recap. Spoken news-anchor lines only.
 - Use get_latest_news only if they ask about a topic you have not covered yet.
 - If the viewer interrupts during a headline, stop and respond — headlines resume only after they go quiet.
 - Voice only — no bullets, emojis, or lists read verbatim.
@@ -475,6 +534,17 @@ class Assistant(Agent):
             return "Could not start the video — continue reporting verbally."
         logger.info("[%s] news video started: topic=%r video_id=%s", self._session_type, topic, video_id)
         self._video_playing = True
+
+        async def _video_watchdog() -> None:
+            try:
+                await asyncio.sleep(180)
+            except asyncio.CancelledError:
+                return
+            if self._video_playing:
+                logger.warning("video watchdog — clearing stuck video_playing after 180s")
+                self._video_playing = False
+
+        asyncio.create_task(_video_watchdog())
         return (
             f"Video '{video_title}' is now playing full-screen on the viewer's device. "
             "Say ONE short line introducing it, then stay quiet until notified it ended."
@@ -491,6 +561,7 @@ class Assistant(Agent):
                 room.on("participant_disconnected", self._on_participant_disconnected)
 
             participant_names = list(self._participants.values())
+            asyncio.create_task(_warm_headline_cache(self))
 
             if self._session_type == "group":
                 count = len(participant_names)
@@ -591,14 +662,15 @@ async def my_agent(ctx: JobContext) -> None:
     # Simli routes TTS through DataStreamIO — audio pause/resume is not supported.
     _use_simli = bool(SIMLI_API_KEY and face_id)
 
-    # Kokoro TTS is blocking (returns full audio at once).
-    # StreamAdapter splits LLM output into sentences and fires parallel
-    # TTS calls so the first sentence plays while the rest are still generating.
-    raw_tts = openai.TTS(base_url=TTS_BASE_URL, model="tts-1", voice=voice, api_key=TTS_API_KEY)
-    streamed_tts = StreamAdapter(tts=raw_tts)
+    streamed_tts = _build_tts(voice)
 
     session = AgentSession(
-        stt=openai.STT(base_url=STT_BASE_URL, model=STT_MODEL, api_key=STT_API_KEY),
+        stt=openai.STT(
+            base_url=STT_BASE_URL,
+            model=STT_MODEL,
+            api_key=STT_API_KEY,
+            language=_stt_language(language),
+        ),
         llm=openai.LLM(
             base_url=LLM_BASE_URL,
             model=LLM_MODEL,
@@ -838,7 +910,7 @@ async def my_agent(ctx: JobContext) -> None:
             if (
                 not _bc["conversation_mode"]
                 or _bc["user_state"] == "speaking"
-                or session.agent_state == "speaking"
+                or session.agent_state in ("speaking", "thinking")
                 or _bc["agent_responding_to_user"]
                 or agent._video_playing
                 or not ctx.room.isconnected()
@@ -864,7 +936,7 @@ async def my_agent(ctx: JobContext) -> None:
                 or not _bc["user_turn_active"]
                 or _bc["agent_responding_to_user"]
                 or _bc["user_state"] == "speaking"
-                or session.agent_state == "speaking"
+                or session.agent_state in ("speaking", "thinking")
             ):
                 return
             logger.info(
@@ -896,6 +968,9 @@ async def my_agent(ctx: JobContext) -> None:
                 _bc["user_turn_active"] = True
                 _bc["paused"] = True
                 _cancel_conversation_idle()
+                asyncio.create_task(
+                    _warm_headline_cache(agent, text if not agent._preferred_location else None)
+                )
                 if not _bc["conversation_mode"]:
                     asyncio.create_task(_enter_conversation_mode())
             asyncio.create_task(
@@ -995,7 +1070,7 @@ async def my_agent(ctx: JobContext) -> None:
                 or agent._video_playing
                 or not ctx.room.isconnected()
                 or _bc["user_state"] == "speaking"
-                or session.agent_state == "speaking"
+                or session.agent_state in ("speaking", "thinking")
             ):
                 return
             ok = await agent._deliver_headline_via_tts(is_first=False)
@@ -1026,7 +1101,7 @@ async def my_agent(ctx: JobContext) -> None:
             or _bc["conversation_mode"]
             or _bc["agent_responding_to_user"]
             or _bc["user_state"] == "speaking"
-            or session.agent_state == "speaking"
+            or session.agent_state in ("speaking", "thinking")
             or agent._video_playing
         ):
             return
@@ -1043,13 +1118,16 @@ async def my_agent(ctx: JobContext) -> None:
 
     def _on_agent_state_changed(ev) -> None:
         try:
-            if ev.new_state == "speaking" and _bc["paused"]:
+            if ev.new_state in ("thinking", "speaking") and _bc["paused"]:
                 _cancel_resume_task()
                 _cancel_reply_nudge()
                 _cancel_conversation_idle()
                 if _bc["user_turn_active"]:
                     _bc["agent_responding_to_user"] = True
-                    logger.info("agent responding to viewer")
+                    if ev.new_state == "speaking":
+                        logger.info("agent responding to viewer")
+                    else:
+                        logger.info("agent thinking — holding bulletin and nudge")
             elif ev.old_state == "speaking" and ev.new_state in ("listening", "idle"):
                 if _bc["user_turn_active"]:
                     if _bc["agent_responding_to_user"]:
@@ -1092,7 +1170,7 @@ async def my_agent(ctx: JobContext) -> None:
                     _bc["resume_task"] = asyncio.create_task(_resume_bulletin_after_user_turn())
                 elif (
                     not _bc["agent_responding_to_user"]
-                    and session.agent_state != "speaking"
+                    and session.agent_state not in ("speaking", "thinking")
                 ):
                     # Follow-up window — restart idle if speech did not trigger a new reply.
                     _schedule_conversation_idle()

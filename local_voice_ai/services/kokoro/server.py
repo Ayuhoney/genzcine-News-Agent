@@ -3,7 +3,8 @@
 Replaces the ``ghcr.io/remsky/kokoro-fastapi-cpu`` image with a small in-tree
 service that exposes only what ``livekit.plugins.openai.TTS`` needs:
 
-  - ``POST /v1/audio/speech``  → audio bytes
+  - ``POST /v1/audio/speech``  → audio bytes, or streamed PCM when
+    ``response_format=pcm`` / ``stream_format=audio``
   - ``GET  /v1/models``         → list of one model
   - ``GET  /health``            → readiness probe
 
@@ -17,15 +18,17 @@ import asyncio
 import io
 import logging
 import os
+import re
+import threading
 import time
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Iterator, Optional
 
 import numpy as np
 import soundfile as sf
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 logger = logging.getLogger("kokoro")
@@ -53,7 +56,16 @@ SUPPORTED_LANG_CODES = {
 # One KPipeline per language, created lazily and cached (the 82M model weights
 # are shared; each pipeline only adds that language's G2P frontend).
 _pipelines: dict[str, object] = {}
+_pipeline_locks: dict[str, threading.Lock] = {}
 _espeak_fixed = False
+
+
+def _lock_for(lang_code: str) -> threading.Lock:
+    lock = _pipeline_locks.get(lang_code)
+    if lock is None:
+        lock = threading.Lock()
+        _pipeline_locks[lang_code] = lock
+    return lock
 
 
 def _fix_espeak() -> None:
@@ -119,24 +131,73 @@ class SpeechRequest(BaseModel):
     model: Optional[str] = None
     input: str
     voice: Optional[str] = None
-    response_format: Optional[str] = "mp3"
+    response_format: Optional[str] = "wav"
     speed: Optional[float] = 1.0
+    stream: Optional[bool] = None
+    stream_format: Optional[str] = None  # openai SDK sends "audio" | "sse"
 
 
-def _synthesize(text: str, voice: str, speed: float) -> np.ndarray:
-    pipeline = _get_pipeline(_lang_for_voice(voice))
-    chunks: list[np.ndarray] = []
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?।])\s+")
+
+
+def _split_spoken_units(text: str) -> list[str]:
+    """Kokoro often yields one blob for a whole paragraph. Split so the first
+    sentence can stream out while later ones are still synthesizing."""
+    clean = (text or "").strip()
+    if not clean:
+        return []
+    parts = [p.strip() for p in _SENTENCE_SPLIT.split(clean) if p.strip()]
+    return parts or [clean]
+
+
+def _to_pcm16(audio: np.ndarray) -> bytes:
+    pcm = np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0)
+    return (pcm * 32767.0).astype(np.int16).tobytes()
+
+
+def _synth_unit(pipeline, text: str, voice: str, speed: float) -> Iterator[bytes]:
     for _, _, audio in pipeline(text, voice=voice, speed=speed):
         if hasattr(audio, "cpu"):
             audio = audio.cpu().numpy()
-        chunks.append(np.asarray(audio, dtype=np.float32))
+        chunk = _to_pcm16(audio)
+        if chunk:
+            yield chunk
+
+
+def _iter_pcm_chunks(text: str, voice: str, speed: float) -> Iterator[bytes]:
+    """Yield s16le PCM after each spoken sentence/clause."""
+    lang = _lang_for_voice(voice)
+    units = _split_spoken_units(text)
+    with _lock_for(lang):
+        pipeline = _get_pipeline(lang)
+        for unit in units:
+            yield from _synth_unit(pipeline, unit, voice, speed)
+
+
+def _should_stream(req: SpeechRequest) -> bool:
+    if req.stream:
+        return True
+    if (req.stream_format or "").lower() == "audio":
+        return True
+    return (req.response_format or "").lower() == "pcm"
+
+
+def _synthesize(text: str, voice: str, speed: float) -> np.ndarray:
+    lang = _lang_for_voice(voice)
+    chunks: list[np.ndarray] = []
+    with _lock_for(lang):
+        pipeline = _get_pipeline(lang)
+        for _, _, audio in pipeline(text, voice=voice, speed=speed):
+            if hasattr(audio, "cpu"):
+                audio = audio.cpu().numpy()
+            chunks.append(np.asarray(audio, dtype=np.float32))
     if not chunks:
         return np.zeros(0, dtype=np.float32)
     return np.concatenate(chunks)
 
 
 def _encode(audio: np.ndarray, fmt: str) -> tuple[bytes, str]:
-    fmt = (fmt or "mp3").lower()
+    fmt = (fmt or "wav").lower()
     buf = io.BytesIO()
 
     if fmt in {"mp3", "opus", "aac", "flac"}:
@@ -158,16 +219,55 @@ async def speech(req: SpeechRequest) -> Response:
         raise HTTPException(status_code=400, detail="input is required")
 
     voice = req.voice or DEFAULT_VOICE
-    try:
-        loop = asyncio.get_event_loop()
-        audio = await loop.run_in_executor(
-            None, _synthesize, req.input, voice, float(req.speed or 1.0)
+    speed = float(req.speed or 1.0)
+    loop = asyncio.get_running_loop()
+
+    if _should_stream(req):
+        queue: asyncio.Queue[bytes | Exception | None] = asyncio.Queue()
+
+        def _produce() -> None:
+            try:
+                for chunk in _iter_pcm_chunks(req.input, voice, speed):
+                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+            except Exception as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+
+        produce_task = loop.run_in_executor(None, _produce)
+
+        async def _pcm_stream():
+            first = True
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    if isinstance(item, Exception):
+                        logger.exception("synthesis failed")
+                        if first:
+                            raise item
+                        break
+                    first = False
+                    yield item
+            finally:
+                await produce_task
+
+        return StreamingResponse(
+            _pcm_stream(),
+            media_type="audio/pcm",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+            },
         )
+
+    try:
+        audio = await loop.run_in_executor(None, _synthesize, req.input, voice, speed)
     except Exception as exc:
         logger.exception("synthesis failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    data, media_type = _encode(audio, req.response_format or "mp3")
+    data, media_type = _encode(audio, req.response_format or "wav")
     return Response(content=data, media_type=media_type)
 
 

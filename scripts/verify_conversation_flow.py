@@ -23,7 +23,7 @@ PARTICIPANT = "AutoTestViewer"
 FACE_ID = "cace3ef7-a4c4-425d-a8cf-a5358eb0c427"
 
 UTTERANCES = (
-    "Hello TINA, what is the top news today?",
+    "Mohali",
     "Tell me more about that story please.",
 )
 
@@ -186,8 +186,8 @@ async def run_test() -> FlowReport:
         await room.disconnect()
         return report
 
-    print("waiting for bulletin intro (12s)…")
-    await asyncio.sleep(12)
+    print("waiting for city-ask greeting (8s)…")
+    await asyncio.sleep(8)
 
     for i, line in enumerate(UTTERANCES, start=1):
         print(f"speaking utterance {i}: {line!r}")

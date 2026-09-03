@@ -122,8 +122,11 @@ def _build_specs(cfg: Config) -> list[ChildSpec]:
     # --- TTS (Kokoro) ------------------------------------------------
     if cfg.manage_tts:
         import multiprocessing
-        # One worker per CPU core — fully saturate the VPS for max TTS concurrency.
-        tts_workers = max(1, multiprocessing.cpu_count())
+        # StreamAdapter fires 2–3 sentence TTS calls in parallel. 2 workers =
+        # current sentence + next, without 4-way CPU contention on a 4-core VPS
+        # (that made time-to-first-audio worse). Each worker is capped to 2
+        # OpenMP threads so 2×2 matches the 4 cores.
+        tts_workers = min(2, max(1, multiprocessing.cpu_count()))
         specs.append(
             ChildSpec(
                 name="kokoro",
@@ -133,6 +136,11 @@ def _build_specs(cfg: Config) -> list[ChildSpec]:
                     "--port", str(cfg.tts_bind_port),
                     "--workers", str(tts_workers),
                 ],
+                env={
+                    "OMP_NUM_THREADS": "2",
+                    "MKL_NUM_THREADS": "2",
+                    "OPENBLAS_NUM_THREADS": "2",
+                },
                 ready_url=f"http://127.0.0.1:{cfg.tts_bind_port}/v1/models",
                 ready_timeout=600.0,
             )
