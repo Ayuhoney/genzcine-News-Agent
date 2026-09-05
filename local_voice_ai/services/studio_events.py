@@ -38,4 +38,5 @@ def headline_article(article: dict[str, Any], *, index: int) -> dict[str, Any]:
         "source": article.get("source", ""),
         "pubDate": article.get("pubDate", ""),
         "link": article.get("link", ""),
+        "provider": article.get("provider", ""),
     }

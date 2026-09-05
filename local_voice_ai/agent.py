@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
+from difflib import SequenceMatcher
 from typing import Any
 
 from urllib.parse import urlparse
@@ -41,8 +43,65 @@ LLM_API_KEY  = os.getenv("LLAMA_API_KEY",  "")
 
 # STT
 STT_BASE_URL = os.getenv("STT_BASE_URL", "https://api.groq.com/openai/v1")
-STT_MODEL    = os.getenv("STT_MODEL",    "whisper-large-v3-turbo")
+STT_MODEL    = os.getenv("STT_MODEL",    "whisper-large-v3")
 STT_API_KEY  = os.getenv("STT_API_KEY",  "")
+# Whisper maps Indian city names to English lookalikes ("Firozpur" → "Frostburt").
+_STT_PROMPT = (
+    "Indian news place names: Firozpur, Ferozepur, Mohali, Ludhiana, Amritsar, "
+    "Jalandhar, Patiala, Bathinda, Chandigarh, Punjab, Delhi, Mumbai, Jaipur, "
+    "Lucknow, Kolkata, Hyderabad, Chennai, Bengaluru, Pune, Gurugram."
+)
+_PLACE_ALIASES = {
+    "firozpur": "Firozpur",
+    "ferozepur": "Firozpur",
+    "ferozpur": "Firozpur",
+    "firazpur": "Firozpur",
+    "firospur": "Firozpur",
+    "frostburt": "Firozpur",
+    "frostburg": "Firozpur",
+    "frostburn": "Firozpur",
+    "rospor": "Firozpur",
+    "rose pour": "Firozpur",
+    "rosepor": "Firozpur",
+    "rose pur": "Firozpur",
+    "it all spur": "Firozpur",
+    "all spur": "Firozpur",
+    "philosphy": "Firozpur",
+}
+_KNOWN_PLACES = (
+    "Firozpur", "Ferozepur", "Mohali", "Ludhiana", "Amritsar", "Jalandhar",
+    "Patiala", "Bathinda", "Chandigarh", "Punjab", "Delhi", "Mumbai",
+    "Jaipur", "Lucknow", "Kolkata", "Hyderabad", "Chennai", "Bengaluru",
+    "Pune", "Ahmedabad", "Noida", "Gurugram", "Gurgaon",
+)
+
+
+def _norm_place(text: str) -> str:
+    return re.sub(r"[^a-z]", "", (text or "").lower())
+
+
+def _correct_place_transcript(text: str) -> str:
+    """Map common Whisper mishears of Indian cities back to the real name."""
+    raw = (text or "").strip()
+    if not raw:
+        return raw
+    key = " ".join(raw.lower().split())
+    if key in _PLACE_ALIASES:
+        return _PLACE_ALIASES[key]
+    for alias, canon in sorted(_PLACE_ALIASES.items(), key=lambda item: -len(item[0])):
+        if alias in key:
+            return re.sub(re.escape(alias), canon, raw, count=1, flags=re.I)
+    words = raw.split()
+    if len(words) <= 5:
+        compact = _norm_place(raw)
+        best, score = "", 0.0
+        for place in _KNOWN_PLACES:
+            ratio = SequenceMatcher(None, compact, _norm_place(place)).ratio()
+            if ratio > score:
+                best, score = place, ratio
+        if best and score >= 0.74:
+            return best
+    return raw
 
 # TTS (Kokoro local)
 TTS_BASE_URL = os.getenv("TTS_BASE_URL", "http://127.0.0.1:8880/v1")
@@ -184,6 +243,9 @@ ON-AIR STYLE:
 - End replies naturally when helpful, e.g. "Want to know more?" or "Anything else on that story?"
 - Never narrate your plan, list options, or give a long recap. Spoken news-anchor lines only.
 - Use get_latest_news only if they ask about a topic you have not covered yet.
+- Headlines are a mix: GenzCine published, local city news, and global/national wire. Cover all three; do not stay on one type.
+- If a headline is tagged [GenzCine community], introduce it as news published by a GenzCine reporter or viewer. Do not invent extra facts beyond the title.
+- If a headline is tagged [GenzCine local], treat it as local news from the GenzCine app for the viewer's city.
 - If the viewer interrupts during a headline, stop and respond — headlines resume only after they go quiet.
 - Voice only — no bullets, emojis, or lists read verbatim.
 
@@ -257,6 +319,10 @@ def _headline_spoken_line(
 ) -> str:
     title = str(article.get("title", "")).strip()
     desc = _trim_description(str(article.get("description", "")))
+    if article.get("provider") == "community":
+        title = f"From a GenzCine reporter: {title}"
+    elif article.get("provider") == "genzcine":
+        title = f"From GenzCine local: {title}"
     if is_first:
         who = f" {viewer_name}" if viewer_name else ""
         greet = f"Hey{who}! I'm {anchor_name}, your GenzCine news anchor. This is today's news."
@@ -453,7 +519,7 @@ class Assistant(Agent):
                 "stock market", "Bollywood"). Leave empty for general top headlines.
         """
         if topic:
-            self._preferred_location = topic.strip()
+            self._preferred_location = _correct_place_transcript(topic.strip())
         articles = await fetch_latest_news(
             query=self._preferred_location or None, language=self._language, limit=NEWS_HEADLINE_LIMIT
         )
@@ -474,7 +540,15 @@ class Assistant(Agent):
                 "naturally, then keep the conversation going without inventing news."
             )
         await self._publish_headlines(articles, topic=topic or "")
-        lines = [f"- {a['title']} ({a['source']})" for a in articles]
+        lines = []
+        for a in articles:
+            if a.get("provider") == "community":
+                tag = " [GenzCine community]"
+            elif a.get("provider") == "genzcine":
+                tag = " [GenzCine local]"
+            else:
+                tag = ""
+            lines.append(f"- {a['title']} ({a['source']}){tag}")
         return (
             "Headlines fetched (titles only — expand briefly when speaking, do not invent):\n"
             + "\n".join(lines)
@@ -670,6 +744,7 @@ async def my_agent(ctx: JobContext) -> None:
             model=STT_MODEL,
             api_key=STT_API_KEY,
             language=_stt_language(language),
+            prompt=_STT_PROMPT,
         ),
         llm=openai.LLM(
             base_url=LLM_BASE_URL,
@@ -962,7 +1037,9 @@ async def my_agent(ctx: JobContext) -> None:
         try:
             if not ev.is_final:
                 return
-            text = (ev.transcript or "").strip()
+            text = _correct_place_transcript((ev.transcript or "").strip())
+            if text and text != (ev.transcript or "").strip():
+                logger.info("STT place correction: %r → %r", (ev.transcript or "")[:80], text)
             if text:
                 logger.info("mic STT final: %r", text[:120])
                 _bc["user_turn_active"] = True
@@ -976,7 +1053,7 @@ async def my_agent(ctx: JobContext) -> None:
             asyncio.create_task(
                 _publish_transcript(
                     role="user",
-                    text=ev.transcript,
+                    text=text or ev.transcript,
                     is_final=True,
                     item_id=ev.item_id or "",
                 )
