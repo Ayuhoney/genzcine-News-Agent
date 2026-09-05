@@ -5,14 +5,18 @@ import pytest
 
 from local_voice_ai.services.news import (
     _HEADLINE_CACHE,
+    _OFFICIAL_PAPER_RSS,
     _community_title_ok,
     _from_genzcine_doc,
     _google_rss_url,
     _is_junk_title,
+    _is_preferred_paper,
     _mentions_query,
     _merge_articles,
     _mix_buckets,
     _parse_google_rss,
+    _prefer_indian_papers,
+    _preferred_paper_query,
     fetch_latest_news,
 )
 
@@ -105,11 +109,37 @@ async def test_fetch_latest_news_falls_back_to_youtube(monkeypatch):
     assert "youtube.com" in articles[0]["link"]
 
 
+def test_preferred_indian_papers_detected_and_boosted():
+    query = _preferred_paper_query("Firozpur")
+    assert "Dainik Bhaskar" in query
+    assert "Times of India" in query
+    assert "Firozpur" in query
+    assert _is_preferred_paper({"title": "X", "source": "Dainik Jagran"})
+    assert _is_preferred_paper({"title": "X", "source": "The Hindu"})
+    assert _is_preferred_paper({"title": "X", "source": "Punjab Kesari"})
+    assert _is_preferred_paper({"title": "X", "source": "दैनिक जागरण"})
+    assert not _is_preferred_paper({"title": "X", "source": "ZigWheels"})
+    ranked = _prefer_indian_papers(
+        [
+            {"title": "Bike price", "source": "ZigWheels"},
+            {"title": "Cabinet meet", "source": "Hindustan Times"},
+        ]
+    )
+    assert ranked[0]["source"] == "Hindustan Times"
+
+
 def test_google_rss_english_uses_india():
     url = _google_rss_url("Firozpur", "en-US")
     assert "gl=IN" in url
     assert "ceid=IN%3Aen" in url or "ceid=IN:en" in url
     assert "hl=en-IN" in url
+
+
+def test_official_english_paper_rss_listed():
+    names = {name for name, _url in _OFFICIAL_PAPER_RSS}
+    assert names == {"Hindustan Times", "The Hindu", "Times of India"}
+    assert _is_preferred_paper({"title": "X", "source": "दैनिक भास्कर"})
+    assert _is_preferred_paper({"title": "Dainik Bhaskar: flood alert", "source": "Google News"})
 
 
 def test_community_title_ok_filters_junk():

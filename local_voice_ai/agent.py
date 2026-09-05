@@ -27,7 +27,7 @@ from livekit.plugins import openai, silero, simli
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from .services.agent_errors import classify_agent_error
-from .services.india_places import all_place_names
+from .services.india_places import all_place_names, canonical_place, extract_place, news_query_for
 from .services.news import fetch_latest_news
 from .services.studio_events import STUDIO_TOPIC, headline_article, publish_studio_event
 from .services.youtube import search_news_video
@@ -48,10 +48,9 @@ STT_MODEL    = os.getenv("STT_MODEL",    "whisper-large-v3")
 STT_API_KEY  = os.getenv("STT_API_KEY",  "")
 # Whisper maps Indian city names to English lookalikes ("Firozpur" → "Frostburt").
 _STT_PROMPT = (
-    "Indian news place names: Firozpur, Ferozepur, Mohali, Ludhiana, Amritsar, "
-    "Jalandhar, Patiala, Bathinda, Chandigarh, Punjab, Delhi, Mumbai, Jaipur, "
-    "Lucknow, Kolkata, Hyderabad, Chennai, Bengaluru, Bangalore, Pune, "
-    "Gurugram, Gurgaon."
+    "Indian news place names: Delhi, Mumbai, Kolkata, Chennai, Bengaluru, "
+    "Hyderabad, Pune, Ahmedabad, Jaipur, Lucknow, Patna, Bhopal, Chandigarh, "
+    "Punjab, Kerala, Tamil Nadu, Firozpur, Mohali."
 )
 _PLACE_ALIASES = {
     "firozpur": "Firozpur",
@@ -71,6 +70,11 @@ _PLACE_ALIASES = {
     "philosphy": "Firozpur",
     "bangalore": "Bengaluru",
     "gurgaon": "Gurugram",
+    "chaldea girl": "Chandigarh",
+    "chaldea": "Chandigarh",
+    "chandi garh": "Chandigarh",
+    "chander garh": "Chandigarh",
+    "chandigrah": "Chandigarh",
     "calcutta": "Kolkata",
     "madras": "Chennai",
     "trivandrum": "Thiruvananthapuram",
@@ -93,6 +97,12 @@ def _correct_place_transcript(text: str) -> str:
     raw = (text or "").strip()
     if not raw:
         return raw
+    known = canonical_place(raw)
+    if known is not None:
+        return known
+    extracted = extract_place(raw)
+    if extracted:
+        return extracted
     key = " ".join(raw.lower().split())
     if key in _PLACE_ALIASES:
         return _PLACE_ALIASES[key]
@@ -100,15 +110,21 @@ def _correct_place_transcript(text: str) -> str:
         if alias in key:
             return re.sub(re.escape(alias), canon, raw, count=1, flags=re.I)
     words = raw.split()
-    if len(words) <= 5:
-        compact = _norm_place(raw)
-        best, score = "", 0.0
+    compact = _norm_place(raw)
+    if len(words) <= 5 and len(compact) >= 5:
+        ranked: list[tuple[float, str]] = []
         for place in _KNOWN_PLACES:
-            ratio = SequenceMatcher(None, compact, _norm_place(place)).ratio()
-            if ratio > score:
-                best, score = place, ratio
-        if best and score >= 0.74:
-            return best
+            pname = _norm_place(place)
+            if abs(len(pname) - len(compact)) > 3:
+                continue
+            ranked.append((SequenceMatcher(None, compact, pname).ratio(), place))
+        ranked.sort(reverse=True)
+        if (
+            ranked
+            and ranked[0][0] >= 0.74
+            and (len(ranked) == 1 or ranked[0][0] - ranked[1][0] >= 0.06)
+        ):
+            return ranked[0][1]
     return raw
 
 # TTS (Kokoro local)
@@ -241,7 +257,7 @@ TOOLS (required):
 
 SESSION START:
 - You have already asked the viewer which city or region they want news for.
-- As soon as they answer (e.g. "Mohali", "Delhi", "national"), call get_latest_news with that location as the topic, then immediately start the bulletin — no further questions.
+- As soon as they answer with any Indian city or state (e.g. "Jaipur", "Kerala", "Firozpur") or "national", call get_latest_news with that location as the topic, then immediately start the bulletin — no further questions.
 - If they say something vague like "anything" or "you decide", call get_latest_news with topic="" for national headlines and start the bulletin.
 
 ON-AIR STYLE:
@@ -252,6 +268,7 @@ ON-AIR STYLE:
 - Never narrate your plan, list options, or give a long recap. Spoken news-anchor lines only.
 - Use get_latest_news only if they ask about a topic you have not covered yet.
 - Headlines are a mix: GenzCine published, local city news, and global/national wire. Cover all three; do not stay on one type.
+- When a source is Dainik Bhaskar, Punjab Kesari, Amar Ujala, Dainik Jagran, The Hindu, Times of India, or Hindustan Times, name that paper once. If the title is in Hindi (or another Indian language) and you are speaking English, translate briefly — do not invent facts.
 - If a headline is tagged [GenzCine community], introduce it as news published by a GenzCine reporter or viewer. Do not invent extra facts beyond the title.
 - If a headline is tagged [GenzCine local], treat it as local news from the GenzCine app for the viewer's city.
 - If the viewer interrupts during a headline, stop and respond — headlines resume only after they go quiet.
@@ -342,7 +359,7 @@ def _headline_spoken_line(
 
 
 async def _refresh_headlines(agent: "Assistant", *, topic: str = "") -> bool:
-    query = topic or agent._preferred_location or None
+    query = news_query_for(topic or agent._preferred_location or None)
     articles = await fetch_latest_news(
         query=query,
         language=agent._language,
@@ -527,7 +544,9 @@ class Assistant(Agent):
                 "stock market", "Bollywood"). Leave empty for general top headlines.
         """
         if topic:
-            self._preferred_location = _correct_place_transcript(topic.strip())
+            self._preferred_location = (
+                news_query_for(_correct_place_transcript(topic.strip())) or ""
+            )
         articles = await fetch_latest_news(
             query=self._preferred_location or None, language=self._language, limit=NEWS_HEADLINE_LIMIT
         )
@@ -649,7 +668,7 @@ class Assistant(Agent):
                 name_list = ", ".join(participant_names) if participant_names else "everyone"
                 await self.session.say(
                     f"Hey {name_list}! I'm {self._anchor_name}. "
-                    "Which city — Punjab, Delhi, Mumbai, or national?",
+                    "Which Indian city or state do you want — or say national?",
                     allow_interruptions=True,
                 )
             else:
@@ -657,7 +676,7 @@ class Assistant(Agent):
                 who = f" {viewer_name}" if viewer_name else ""
                 await self.session.say(
                     f"Hey{who}! I'm {self._anchor_name}. "
-                    "Which city — Mohali, Delhi, Mumbai, Punjab, or national?",
+                    "Which Indian city or state do you want — or say national?",
                     allow_interruptions=True,
                 )
         except Exception as exc:

@@ -12,7 +12,7 @@ from urllib.parse import quote_plus
 
 import httpx
 
-from .india_places import aliases_for
+from .india_places import aliases_for, news_query_for
 
 logger = logging.getLogger("news")
 
@@ -80,8 +80,31 @@ _COMMUNITY_SOURCES = ("user", "citizen")
 _MIN_COMMUNITY_TITLE_LEN = 12
 _JUNK_TITLE = re.compile(
     r"\b(on[\s-]?road price|gold rate|silver rate|price in|rate today|aqi|"
-    r"air quality|weather forecast|horoscope|numerology|lucky tips|birth numbers)\b",
+    r"air quality|weather forecast|horoscope|numerology|lucky tips|birth numbers|"
+    r"bluetooth speaker|scalp care|on-screen calculator)\b",
     re.I,
+)
+# Client-requested Indian papers. No official developer APIs.
+# English public RSS works for HT / The Hindu / TOI. Others via Google News.
+_PREFERRED_PAPERS = (
+    "Dainik Bhaskar",
+    "Punjab Kesari",
+    "Amar Ujala",
+    "Dainik Jagran",
+    "The Hindu",
+    "Times of India",
+    "Hindustan Times",
+)
+_PREFERRED_SOURCE_RX = re.compile(
+    r"bhaskar|punjab kesari|kesri|amar ujala|jagran|the hindu|"
+    r"times of india|hindustan times|"
+    r"भास्कर|केसरी|अमर उजाला|जागरण|द हिंदू|टाइम्स ऑफ इंडिया|हिंदुस्तान टाइम्स",
+    re.I,
+)
+_OFFICIAL_PAPER_RSS = (
+    ("Hindustan Times", "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml"),
+    ("The Hindu", "https://www.thehindu.com/news/national/feeder/default.rss"),
+    ("Times of India", "https://timesofindia.indiatimes.com/rssfeeds/-2128936835.cms"),
 )
 
 
@@ -194,13 +217,15 @@ def _google_rss_url(query: Optional[str], language: str) -> str:
     hl, gl, ceid = _RSS_LOCALE.get(language, ("en-IN", "IN", "IN:en"))
     if query:
         return (
-            f"{GOOGLE_NEWS_RSS}/search?q={quote_plus(query[:100])}"
+            f"{GOOGLE_NEWS_RSS}/search?q={quote_plus(query[:350])}"
             f"&hl={hl}&gl={gl}&ceid={ceid}"
         )
     return f"{GOOGLE_NEWS_RSS}?hl={hl}&gl={gl}&ceid={ceid}"
 
 
-def _parse_google_rss(xml_text: str, limit: int) -> list[dict[str, Any]]:
+def _parse_google_rss(
+    xml_text: str, limit: int, default_source: str = "Google News"
+) -> list[dict[str, Any]]:
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
@@ -216,7 +241,11 @@ def _parse_google_rss(xml_text: str, limit: int) -> list[dict[str, Any]]:
         pub_date = (item.findtext("pubDate") or "").strip()
         description = _strip_html(item.findtext("description") or "")
         source_el = item.find("source")
-        source = (source_el.text or "Google News").strip() if source_el is not None else "Google News"
+        source = (
+            (source_el.text or default_source).strip()
+            if source_el is not None
+            else default_source
+        )
         articles.append(
             _article(
                 title=title,
@@ -257,6 +286,28 @@ async def _fetch_google_rss(
     except (httpx.RequestError, httpx.HTTPError, ValueError):
         logger.exception("google news rss request failed")
         return []
+
+
+async def _fetch_official_paper_rss(limit: int) -> list[dict[str, Any]]:
+    """Public English RSS from papers that publish one. No API key."""
+    headers = {"User-Agent": "GenzCineNewsAgent/1.0"}
+
+    async def _one(name: str, url: str) -> list[dict[str, Any]]:
+        try:
+            resp = await _http().get(url, headers=headers)
+            if resp.status_code != 200:
+                logger.warning("paper rss %s returned %s", name, resp.status_code)
+                return []
+            return _parse_google_rss(resp.text, max(limit, 4), default_source=name)
+        except (httpx.RequestError, httpx.HTTPError, ValueError):
+            logger.warning("paper rss failed: %s", name)
+            return []
+
+    chunks = await asyncio.gather(*[_one(name, url) for name, url in _OFFICIAL_PAPER_RSS])
+    merged = _merge_articles(*chunks, limit=max(limit * 2, 8))
+    if merged:
+        logger.info("official paper rss: %d headlines", len(merged))
+    return merged
 
 
 async def _fetch_youtube_headlines(
@@ -344,6 +395,28 @@ def _query_aliases(query: str) -> tuple[str, ...]:
 def _mentions_query(article: dict[str, Any], query: str) -> bool:
     blob = f"{article.get('title') or ''} {article.get('description') or ''}".lower()
     return any(alias in blob for alias in _query_aliases(query) if alias)
+
+
+def _is_preferred_paper(article: dict[str, Any]) -> bool:
+    blob = f"{article.get('source') or ''} {article.get('title') or ''}"
+    return bool(_PREFERRED_SOURCE_RX.search(blob))
+
+
+def _prefer_indian_papers(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    preferred = [a for a in articles if _is_preferred_paper(a)]
+    other = [a for a in articles if a not in preferred]
+    return preferred + other
+
+
+def _preferred_paper_query(place: Optional[str]) -> str:
+    papers = " OR ".join(f'"{name}"' for name in _PREFERRED_PAPERS)
+    if place and place.strip():
+        return f"({place.strip()}) ({papers})"
+    return f"India ({papers})"
+
+
+async def _empty_articles() -> list[dict[str, Any]]:
+    return []
 
 
 def _geo_match_clause(value: str) -> dict[str, Any]:
@@ -550,9 +623,8 @@ async def _fetch_published_news(
     app_local = [a for group in buckets for a in group if a.get("provider") != "community"]
     if city:
         matched_reporters = [a for a in reporters if _mentions_query(a, city)]
-        other_reporters = [a for a in reporters if a not in matched_reporters][:2]
         matched_local = [a for a in app_local if _mentions_query(a, city)]
-        merged = _merge_articles(matched_reporters, other_reporters, matched_local, limit=max(limit * 2, 8))
+        merged = _merge_articles(matched_reporters, matched_local, limit=max(limit * 2, 8))
     else:
         merged = _merge_articles(reporters[:4], app_local, limit=max(limit * 2, 8))
     if merged:
@@ -565,7 +637,12 @@ async def fetch_latest_news(
     language: str = "en-US",
     limit: int = 3,
 ) -> list[dict[str, Any]]:
-    """Mix published + local + global headlines in one bulletin."""
+    """Mix published + local + global headlines in one bulletin.
+
+    One spoken place only — never loops states or cities. National/India
+    uses the India wire + paper RSS, not a 36-city crawl.
+    """
+    query = news_query_for(query)
     cache_key = _cache_key(query, language, limit)
     cached = _get_cached_articles(cache_key)
     if cached:
@@ -574,25 +651,35 @@ async def fetch_latest_news(
     stale = _get_stale_articles(cache_key)
     city = (query or "").strip()
 
-    published, rss, global_wire = await _wait_sources(
+    paper_q = _preferred_paper_query(query)
+    published, rss, rss_papers, official, global_wire = await _wait_sources(
         _fetch_published_news(query, limit),
         _fetch_google_rss(query, language, limit),
+        _fetch_google_rss(paper_q, language, limit),
+        _fetch_official_paper_rss(limit),
         _fetch_global_newsdata(language, limit),
         timeout=_FETCH_DEADLINE_SEC,
     )
+    rss = _merge_articles(rss, rss_papers, limit=max(limit * 3, 12))
     rss = [a for a in rss if not _is_junk_title(str(a.get("title") or ""))]
     if city:
         rss = [a for a in rss if _mentions_query(a, city)]
 
     reporters = [a for a in published if a.get("provider") == "community"]
     app_local = [a for a in published if a.get("provider") == "genzcine"]
+    official = [a for a in official if not _is_junk_title(str(a.get("title") or ""))]
     global_wire = [a for a in global_wire if not _is_junk_title(str(a.get("title") or ""))]
     if city:
-        local = _mix_buckets(app_local, rss, limit=max(limit, 6))
-        world = _merge_articles(global_wire, limit=max(limit, 6))
+        official = [a for a in official if _mentions_query(a, city)]
+    rss = _prefer_indian_papers(rss)
+    official = _prefer_indian_papers(official)
+    global_wire = _prefer_indian_papers(global_wire)
+    if city:
+        local = _mix_buckets(app_local, rss, official, limit=max(limit, 6))
+        world = _merge_articles(global_wire, limit=2)
     else:
         local = _merge_articles(app_local, limit=max(limit, 6))
-        world = _merge_articles(global_wire, rss, limit=max(limit, 6))
+        world = _merge_articles(official, rss, global_wire, limit=max(limit, 6))
     articles = _mix_buckets(reporters, local, world, limit=limit)
 
     if articles:
