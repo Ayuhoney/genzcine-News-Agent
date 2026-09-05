@@ -212,7 +212,10 @@ _NATIONAL_KEYS = frozenset(
 _EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
     "firozpur": ("ferozepur", "ferozpore", "ferozpur", "frostburt", "frostburg", "frostburn"),
     "ferozepur": ("firozpur", "ferozpore", "ferozpur"),
-    "mohali": ("sas nagar", "s.a.s. nagar", "sahibzada ajit singh nagar", "mohaly", "mohalli"),
+    "mohali": (
+        "sas nagar", "s.a.s. nagar", "sahibzada ajit singh nagar",
+        "mohaly", "mohalli", "moh ali", "mo hally", "mohally",
+    ),
     "chandigarh": (
         "tricity", "chandigrah", "chandigar", "chandigargh", "chandigarr",
         "chaldea girl", "chaldea", "chandi garh", "chander garh",
