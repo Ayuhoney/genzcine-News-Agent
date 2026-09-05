@@ -27,6 +27,7 @@ from livekit.plugins import openai, silero, simli
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from .services.agent_errors import classify_agent_error
+from .services.india_places import all_place_names
 from .services.news import fetch_latest_news
 from .services.studio_events import STUDIO_TOPIC, headline_article, publish_studio_event
 from .services.youtube import search_news_video
@@ -49,7 +50,8 @@ STT_API_KEY  = os.getenv("STT_API_KEY",  "")
 _STT_PROMPT = (
     "Indian news place names: Firozpur, Ferozepur, Mohali, Ludhiana, Amritsar, "
     "Jalandhar, Patiala, Bathinda, Chandigarh, Punjab, Delhi, Mumbai, Jaipur, "
-    "Lucknow, Kolkata, Hyderabad, Chennai, Bengaluru, Pune, Gurugram."
+    "Lucknow, Kolkata, Hyderabad, Chennai, Bengaluru, Bangalore, Pune, "
+    "Gurugram, Gurgaon."
 )
 _PLACE_ALIASES = {
     "firozpur": "Firozpur",
@@ -67,12 +69,18 @@ _PLACE_ALIASES = {
     "it all spur": "Firozpur",
     "all spur": "Firozpur",
     "philosphy": "Firozpur",
+    "bangalore": "Bengaluru",
+    "gurgaon": "Gurugram",
+    "calcutta": "Kolkata",
+    "madras": "Chennai",
+    "trivandrum": "Thiruvananthapuram",
+    "orissa": "Odisha",
+    "pondicherry": "Puducherry",
+    "allahabad": "Prayagraj",
+    "bombay": "Mumbai",
 }
-_KNOWN_PLACES = (
-    "Firozpur", "Ferozepur", "Mohali", "Ludhiana", "Amritsar", "Jalandhar",
-    "Patiala", "Bathinda", "Chandigarh", "Punjab", "Delhi", "Mumbai",
-    "Jaipur", "Lucknow", "Kolkata", "Hyderabad", "Chennai", "Bengaluru",
-    "Pune", "Ahmedabad", "Noida", "Gurugram", "Gurgaon",
+_KNOWN_PLACES = all_place_names() + (
+    "Bangalore", "Gurgaon", "Calcutta", "Madras", "Trivandrum", "Orissa",
 )
 
 
@@ -133,7 +141,7 @@ def _llm_client_options() -> dict:
         # token budget before any spoken words. Instruct mode is required.
         "reasoning_effort": os.getenv("LLM_REASONING_EFFORT", "none"),
         "temperature": float(os.getenv("LLM_TEMPERATURE", "0.7")),
-        "timeout": httpx.Timeout(connect=10.0, read=read_s, write=15.0, pool=5.0),
+        "timeout": httpx.Timeout(connect=5.0, read=read_s, write=8.0, pool=5.0),
     }
     if "groq.com" in (LLM_BASE_URL or ""):
         opts["extra_body"] = {"reasoning_format": "hidden"}
@@ -197,8 +205,8 @@ BULLETIN_RESUME_AFTER_USER_SECONDS = float(os.getenv("BULLETIN_RESUME_AFTER_USER
 # can ask follow-ups. Timer resets on each new final STT line.
 CONVERSATION_IDLE_SECONDS = float(os.getenv("CONVERSATION_IDLE_SECONDS", "12"))
 REPLY_NUDGE_RETRIES = max(1, int(os.getenv("REPLY_NUDGE_RETRIES", "3")))
-REPLY_NUDGE_DELAY_SECONDS = float(os.getenv("REPLY_NUDGE_DELAY_SECONDS", "2.0"))
-REPLY_NUDGE_RETRY_GAP_SECONDS = float(os.getenv("REPLY_NUDGE_RETRY_GAP_SECONDS", "1.5"))
+REPLY_NUDGE_DELAY_SECONDS = float(os.getenv("REPLY_NUDGE_DELAY_SECONDS", "1.2"))
+REPLY_NUDGE_RETRY_GAP_SECONDS = float(os.getenv("REPLY_NUDGE_RETRY_GAP_SECONDS", "1.0"))
 _HEADLINE_BRIDGES = (
     "Next up in today's news.",
     "Also making headlines.",
@@ -638,23 +646,18 @@ class Assistant(Agent):
             asyncio.create_task(_warm_headline_cache(self))
 
             if self._session_type == "group":
-                count = len(participant_names)
                 name_list = ", ".join(participant_names) if participant_names else "everyone"
                 await self.session.say(
-                    f"Hey {name_list}! I'm {self._anchor_name}, live with GenzCine News "
-                    f"for our group of {count}. "
-                    "Which city or region would you like today's news for — "
-                    "local Punjab, Delhi, Mumbai, or national headlines?",
+                    f"Hey {name_list}! I'm {self._anchor_name}. "
+                    "Which city — Punjab, Delhi, Mumbai, or national?",
                     allow_interruptions=True,
                 )
             else:
                 viewer_name = participant_names[0] if participant_names else None
                 who = f" {viewer_name}" if viewer_name else ""
                 await self.session.say(
-                    f"Hey{who}! I'm {self._anchor_name}, your GenzCine news anchor. "
-                    "Which city or region would you like today's news for? "
-                    "You can say something like Mohali, Delhi, Mumbai, Punjab — "
-                    "or just say 'national' for top headlines.",
+                    f"Hey{who}! I'm {self._anchor_name}. "
+                    "Which city — Mohali, Delhi, Mumbai, Punjab, or national?",
                     allow_interruptions=True,
                 )
         except Exception as exc:
@@ -762,11 +765,11 @@ async def my_agent(ctx: JobContext) -> None:
                 "min_words": 0,
                 # Simli avatar cannot pause mid-utterance; rely on session.interrupt().
                 "resume_false_interruption": not _use_simli,
-                "false_interruption_timeout": 1.5,
+                "false_interruption_timeout": 1.0,
             },
             "endpointing": {
-                "min_delay": 0.25,
-                "max_delay": 1.8,
+                "min_delay": 0.20,
+                "max_delay": 1.2,
             },
             "preemptive_generation": {
                 "enabled": True,

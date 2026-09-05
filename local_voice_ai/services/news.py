@@ -12,6 +12,8 @@ from urllib.parse import quote_plus
 
 import httpx
 
+from .india_places import aliases_for
+
 logger = logging.getLogger("news")
 
 NEWSDATA_URL = "https://newsdata.io/api/1/latest"
@@ -20,6 +22,37 @@ GENZCINE_NEWS_API = os.getenv("GENZCINE_NEWS_API", "https://api.genzcine.com/v1/
 
 _CACHE_TTL_SEC = 20 * 60
 _HEADLINE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_FETCH_DEADLINE_SEC = float(os.getenv("NEWS_FETCH_DEADLINE_SEC", "3.5"))
+_HTTP: httpx.AsyncClient | None = None
+
+
+def _http() -> httpx.AsyncClient:
+    global _HTTP
+    if _HTTP is None or _HTTP.is_closed:
+        _HTTP = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=1.5, read=3.2, write=3.2, pool=1.5),
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=60),
+        )
+    return _HTTP
+
+
+async def _wait_sources(*coros: Any, timeout: float) -> list[Any]:
+    tasks = [asyncio.create_task(coro) for coro in coros]
+    done, pending = await asyncio.wait(tasks, timeout=timeout)
+    for task in pending:
+        task.cancel()
+    results: list[Any] = []
+    for task in tasks:
+        if task in done and not task.cancelled():
+            try:
+                results.append(task.result())
+            except Exception as exc:
+                logger.warning("news source failed: %s", exc)
+                results.append([])
+        else:
+            results.append([])
+    return results
 
 _NEWSDATA_LANG: dict[str, str] = {
     "en-US": "en",
@@ -50,11 +83,6 @@ _JUNK_TITLE = re.compile(
     r"air quality|weather forecast|horoscope|numerology|lucky tips|birth numbers)\b",
     re.I,
 )
-_PLACE_ALIASES: dict[str, tuple[str, ...]] = {
-    "firozpur": ("firozpur", "ferozepur", "ferozpore"),
-    "mohali": ("mohali", "sas nagar", "s.a.s. nagar"),
-    "chandigarh": ("chandigarh", "tricity"),
-}
 
 
 def _cache_key(query: Optional[str], language: str, limit: int) -> str:
@@ -124,8 +152,7 @@ async def _fetch_newsdata(
         params["q"] = query[:100]
 
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(NEWSDATA_URL, params=params)
+        resp = await _http().get(NEWSDATA_URL, params=params)
         if resp.status_code != 200:
             logger.warning("newsdata.io returned %s: %s", resp.status_code, resp.text[:200])
             return []
@@ -150,6 +177,17 @@ async def _fetch_newsdata(
             )
         )
     return articles
+
+
+async def _fetch_global_newsdata(language: str, limit: int) -> list[dict[str, Any]]:
+    """India/world wire, cached so city voice tests do not burn NewsData quota."""
+    cache_key = f"__global_in__:{language}:{limit}"
+    cached = _get_cached_articles(cache_key)
+    if cached:
+        return cached[:limit]
+    articles = await _fetch_newsdata(None, language, limit)
+    _store_cache(cache_key, articles)
+    return articles[:limit]
 
 
 def _google_rss_url(query: Optional[str], language: str) -> str:
@@ -206,18 +244,16 @@ async def _fetch_google_rss(
         queries.append(None)
     headers = {"User-Agent": "GenzCineNewsAgent/1.0"}
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            for rss_query in queries:
-                url = _google_rss_url(rss_query, language)
-                resp = await client.get(url, headers=headers)
-                if resp.status_code != 200:
-                    logger.warning("google news rss returned %s", resp.status_code)
-                    continue
-                articles = _parse_google_rss(resp.text, limit)
-                if articles:
-                    logger.info("google news rss: %d headlines (query=%r)", len(articles), query or "")
-                    return articles
-        return []
+        rss_query = queries[0]
+        url = _google_rss_url(rss_query, language)
+        resp = await _http().get(url, headers=headers)
+        if resp.status_code != 200:
+            logger.warning("google news rss returned %s", resp.status_code)
+            return []
+        articles = _parse_google_rss(resp.text, limit)
+        if articles:
+            logger.info("google news rss: %d headlines (query=%r)", len(articles), query or "")
+        return articles
     except (httpx.RequestError, httpx.HTTPError, ValueError):
         logger.exception("google news rss request failed")
         return []
@@ -243,11 +279,10 @@ async def _fetch_youtube_headlines(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(
-                "https://www.googleapis.com/youtube/v3/search",
-                params=params,
-            )
+        resp = await _http().get(
+            "https://www.googleapis.com/youtube/v3/search",
+            params=params,
+        )
         if resp.status_code != 200:
             logger.warning("youtube headline search returned %s: %s", resp.status_code, resp.text[:200])
             return []
@@ -303,8 +338,7 @@ def _is_junk_title(title: str) -> bool:
 
 
 def _query_aliases(query: str) -> tuple[str, ...]:
-    key = query.strip().lower()
-    return _PLACE_ALIASES.get(key, (key,))
+    return aliases_for(query)
 
 
 def _mentions_query(article: dict[str, Any], query: str) -> bool:
@@ -460,12 +494,11 @@ def _from_genzcine_doc(item: dict[str, Any]) -> dict[str, Any] | None:
 async def _fetch_genzcine_api(params: dict[str, Any]) -> list[dict[str, Any]]:
     """Same public feed the website uses: GET https://api.genzcine.com/v1/news."""
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(
-                GENZCINE_NEWS_API,
-                params=params,
-                headers={"User-Agent": "GenzCineNewsAgent/1.0", "Accept": "application/json"},
-            )
+        resp = await _http().get(
+            GENZCINE_NEWS_API,
+            params=params,
+            headers={"User-Agent": "GenzCineNewsAgent/1.0", "Accept": "application/json"},
+        )
         if resp.status_code != 200:
             logger.warning("genzcine news api returned %s", resp.status_code)
             return []
@@ -496,16 +529,13 @@ async def _fetch_published_news(
     city = (query or "").strip()
     requests: list = [
         _fetch_community_news(None, max(limit, 4)),
-        _fetch_genzcine_api({"exclusive": "true", "limit": 20, "page": 1}),
+        _fetch_genzcine_api({"exclusive": "true", "limit": 10, "page": 1}),
     ]
     if city:
-        requests.append(_fetch_genzcine_api({"city": city, "limit": 20, "page": 1}))
-        requests.append(
-            _fetch_genzcine_api({"category": "local", "city": city, "limit": 20, "page": 1})
-        )
+        requests.append(_fetch_genzcine_api({"city": city, "limit": 10, "page": 1}))
     else:
         requests.append(
-            _fetch_genzcine_api({"category": "local", "country": "in", "limit": 20, "page": 1})
+            _fetch_genzcine_api({"category": "local", "country": "in", "limit": 10, "page": 1})
         )
 
     results = await asyncio.gather(*requests, return_exceptions=True)
@@ -544,10 +574,11 @@ async def fetch_latest_news(
     stale = _get_stale_articles(cache_key)
     city = (query or "").strip()
 
-    published, rss, global_wire = await asyncio.gather(
+    published, rss, global_wire = await _wait_sources(
         _fetch_published_news(query, limit),
         _fetch_google_rss(query, language, limit),
-        _fetch_newsdata(None, language, limit),
+        _fetch_global_newsdata(language, limit),
+        timeout=_FETCH_DEADLINE_SEC,
     )
     rss = [a for a in rss if not _is_junk_title(str(a.get("title") or ""))]
     if city:
@@ -558,18 +589,11 @@ async def fetch_latest_news(
     global_wire = [a for a in global_wire if not _is_junk_title(str(a.get("title") or ""))]
     if city:
         local = _mix_buckets(app_local, rss, limit=max(limit, 6))
-        if len(local) < 2:
-            youtube_local = await _fetch_youtube_headlines(query, limit)
-            local = _merge_articles(local, youtube_local, limit=max(limit, 6))
         world = _merge_articles(global_wire, limit=max(limit, 6))
     else:
         local = _merge_articles(app_local, limit=max(limit, 6))
         world = _merge_articles(global_wire, rss, limit=max(limit, 6))
     articles = _mix_buckets(reporters, local, world, limit=limit)
-
-    if len(articles) < limit:
-        youtube = await _fetch_youtube_headlines(query, limit)
-        articles = _merge_articles(articles, youtube, limit=limit)
 
     if articles:
         _store_cache(cache_key, articles)
