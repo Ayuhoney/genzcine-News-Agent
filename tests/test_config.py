@@ -121,5 +121,6 @@ class TestAgentEnv:
             "LLAMA_BASE_URL", "LLAMA_MODEL", "LLAMA_API_KEY",
             "STT_BASE_URL", "STT_MODEL", "STT_API_KEY", "STT_PROVIDER",
             "TTS_BASE_URL", "TTS_VOICE", "TTS_API_KEY",
+            "SARVAM_API_KEY", "SARVAM_TTS_SPEAKER",
         ):
             assert required in env, f"agent_env missing {required}"

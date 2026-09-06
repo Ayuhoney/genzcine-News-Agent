@@ -97,6 +97,10 @@ class Config:
     simli_face_id: str = "cace3ef7-a4c4-425d-a8cf-a5358eb0c427"
     simli_livekit_url: str = ""  # public URL Simli uses to reach LiveKit (ngrok/tunnel)
 
+    # --- Sarvam (Hindi / Punjabi TTS only; English stays on Kokoro) -----
+    sarvam_api_key: str = ""
+    sarvam_tts_speaker: str = "priya"
+
     # --- Device ---------------------------------------------------------
     device: str = "cpu"  # cpu | cuda | mps
 
@@ -174,6 +178,8 @@ class Config:
             simli_api_key=os.getenv("SIMLI_API_KEY", cls.simli_api_key),
             simli_face_id=os.getenv("SIMLI_FACE_ID", cls.simli_face_id),
             simli_livekit_url=os.getenv("SIMLI_LIVEKIT_URL", cls.simli_livekit_url),
+            sarvam_api_key=os.getenv("SARVAM_API_KEY", cls.sarvam_api_key),
+            sarvam_tts_speaker=os.getenv("SARVAM_TTS_SPEAKER", cls.sarvam_tts_speaker),
             #
             device=os.getenv("DEVICE", cls.device).lower(),
             log_level=os.getenv("LOG_LEVEL", cls.log_level).upper(),
@@ -206,4 +212,6 @@ class Config:
             "SIMLI_API_KEY": self.simli_api_key,
             "SIMLI_FACE_ID": self.simli_face_id,
             "SIMLI_LIVEKIT_URL": self.simli_livekit_url,
+            "SARVAM_API_KEY": self.sarvam_api_key,
+            "SARVAM_TTS_SPEAKER": self.sarvam_tts_speaker,
         }
