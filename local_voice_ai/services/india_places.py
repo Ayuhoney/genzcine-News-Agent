@@ -5,6 +5,8 @@ correction and headline matching work for any state or city, not just Punjab.
 """
 from __future__ import annotations
 
+import re
+
 IN_STATES: tuple[str, ...] = (
     "Andhra Pradesh",
     "Arunachal Pradesh",
@@ -352,7 +354,7 @@ def extract_place(text: str) -> str | None:
     for alias, display in _DISPLAY.items():
         if len(alias) < 4:
             continue
-        if alias in key:
+        if re.search(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", key):
             hits.append(display)
     if not hits:
         return None

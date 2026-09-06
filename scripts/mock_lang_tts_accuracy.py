@@ -104,6 +104,8 @@ def test_detect_spoken_lang() -> None:
         (HI_ASK, "Hindi", "hi"),
         ("Continue in English.", None, "en"),
         ("Tell us about Delhi news.", None, None),
+        ("No, can you still speak English with me?", None, "en"),
+        ("Mujhe Aashika Nepal ka news batao.", None, "hi"),
         (
             "\u06a9\u06cc\u0627 \u062a\u0645 \u06c1\u0646\u062f\u06cc \u0645\u06cc\u06ba \u0628\u0627\u062a \u06a9\u0631 \u0633\u06a9\u062a\u06cc \u06c1\u0648\u061f",
             None,
@@ -159,9 +161,9 @@ def test_headline_scripts() -> None:
     hi = _headline_spoken_line("TINA", article, is_first=True, language="hi")
     pa = _headline_spoken_line("TINA", article, is_first=True, language="pa")
     en = _headline_spoken_line("TINA", article, is_first=True, language="en-US")
-    _ok("headline hi Devanagari", HI_HELLO in hi, hi[:60])
-    _ok("headline pa Gurmukhi", PA_HELLO in pa, pa[:60])
-    _ok("headline en English", "Hey" in en and "TINA" in en, en[:60])
+    _ok("headline hi Devanagari", "\u092a\u0939\u0932\u0940" in hi or "\u0916\u092c\u0930" in hi, hi[:60])
+    _ok("headline pa Gurmukhi", "\u0a16\u0a3c\u0a2c\u0a30" in pa, pa[:60])
+    _ok("headline en English", "top story" in en.lower() and "Firozpur" in en, en[:60])
     _ok("detect headline hi", detect_spoken_lang(hi) == "hi")
     _ok("detect headline pa", detect_spoken_lang(pa) == "pa")
 
@@ -183,17 +185,22 @@ def test_router() -> None:
     _ok("sarvam key loaded", indic is not None)
     if indic is None:
         return
-    _ok("set hi", router.set_spoken("hi") and router.engine == "sarvam-ws:hi")
+    _ok("set hi", router.set_spoken("hi") and router.engine == "sarvam-http:hi")
     _ok(
         "set pa",
-        router.set_spoken("pa") and router.engine == "sarvam-ws:pa" and indic._language == "pa",
+        router.set_spoken("pa") and router.engine == "sarvam-http:pa" and indic._language == "pa",
     )
     _ok("set en back", router.set_spoken("en") is True and router.engine == "kokoro")
     router.set_spoken("hi")
     engine = router._active("To recap quickly: rain in Delhi.")
-    _ok("latin-only while hi uses kokoro", engine is router._english)
+    _ok("latin-only while hi stays sarvam", engine is router._indic)
     engine = router._active("\u0928\u092e\u0938\u094d\u0924\u0947 \u0926\u093f\u0932\u094d\u0932\u0940")
-    _ok("devanagari while hi uses sarvam", engine is router._indic)
+    _ok("devanagari while en uses sarvam", engine is router._indic)
+    router.set_spoken("en")
+    engine = router._active("\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32")
+    _ok("gurmukhi while en uses sarvam pa", engine is router._indic and indic._language == "pa")
+    engine = router._active("You're watching GenzCine.")
+    _ok("latin english stays kokoro", engine is router._english)
 
 
 async def test_kokoro() -> None:

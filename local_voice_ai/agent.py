@@ -18,11 +18,14 @@ from livekit.agents import (
     JobContext,
     JobProcess,
     RunContext,
+    StopResponse,
     cli,
     function_tool,
+    llm as lk_llm,
     room_io,
 )
 from livekit.agents.tts import StreamAdapter
+from livekit.agents.voice.agent_activity import update_instructions as _ctx_update_instructions
 from livekit.plugins import openai, silero, simli
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -30,7 +33,12 @@ from .services.agent_errors import classify_agent_error
 from .services.india_places import all_place_names, canonical_place, extract_place, news_query_for
 from .services.news import fetch_latest_news
 from .services.sarvam_tts import LanguageRoutedTTS, build_sarvam_tts
-from .services.spoken_lang import detect_spoken_lang
+from .services.spoken_lang import (
+    detect_spoken_lang,
+    is_language_switch_only,
+    is_stt_garbage,
+    language_bridge,
+)
 from .services.studio_events import STUDIO_TOPIC, headline_article, publish_studio_event
 from .services.youtube import search_news_video
 
@@ -49,10 +57,9 @@ STT_BASE_URL = os.getenv("STT_BASE_URL", "https://api.groq.com/openai/v1")
 STT_MODEL    = os.getenv("STT_MODEL",    "whisper-large-v3")
 STT_API_KEY  = os.getenv("STT_API_KEY",  "")
 # Whisper maps Indian city names to English lookalikes ("Firozpur" → "Frostburt").
+# Keep this free of switch phrases — Whisper will otherwise transcribe the prompt.
 _STT_PROMPT = (
-    "Indian news conversation. Speech may be English, Hindi, Punjabi, or Hinglish. "
-    "If the speaker is Punjabi, transcribe in Gurmukhi and label language Punjabi. "
-    "If Hindi, transcribe in Devanagari. Sat Sri Akal is always Punjabi. "
+    "Indian news conversation in English, Hindi, or Punjabi. "
     "Place names: Delhi, Mumbai, Kolkata, Chennai, Bengaluru, Hyderabad, Pune, "
     "Ahmedabad, Jaipur, Lucknow, Patna, Bhopal, Chandigarh, Punjab, Kerala, "
     "Tamil Nadu, Firozpur, Mohali."
@@ -101,22 +108,28 @@ def _norm_place(text: str) -> str:
     return re.sub(r"[^a-z]", "", (text or "").lower())
 
 
-def _correct_place_transcript(text: str) -> str:
-    """Map common Whisper mishears of Indian cities back to the real name."""
+def _correct_place_transcript(text: str, *, collapse: bool = True) -> str:
+    """Map common Whisper mishears of Indian cities back to the real name.
+
+    collapse=True (tool topics): 'news from Firozpur city' → 'Firozpur'.
+    collapse=False (the viewer's actual sentence): only swap the misheard
+    word in place, so the LLM still sees what was asked.
+    """
     raw = (text or "").strip()
     if not raw:
         return raw
     known = canonical_place(raw)
     if known is not None:
         return known
-    extracted = extract_place(raw)
-    if extracted:
-        return extracted
+    if collapse:
+        extracted = extract_place(raw)
+        if extracted:
+            return extracted
     key = " ".join(raw.lower().split())
     if key in _PLACE_ALIASES:
         return _PLACE_ALIASES[key]
     for alias, canon in sorted(_PLACE_ALIASES.items(), key=lambda item: -len(item[0])):
-        if alias in key:
+        if re.search(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", key):
             return re.sub(re.escape(alias), canon, raw, count=1, flags=re.I)
     words = raw.split()
     compact = _norm_place(raw)
@@ -151,19 +164,34 @@ def _is_local_service_url(url: str) -> bool:
     return host in {"", "127.0.0.1", "localhost", "::1"}
 
 
+_LLM_IS_GROQ = "groq.com" in (LLM_BASE_URL or "")
+# Bound the chat history sent per turn (system + last N items). Each turn adds
+# user + assistant (+ tool call/result); 16 ≈ the last 5-6 exchanges.
+LLM_HISTORY_MAX_ITEMS = int(os.getenv("LLM_HISTORY_MAX_ITEMS", "16"))
+
+
 def _llm_client_options() -> dict:
-    """Voice-tuned Groq/OpenAI client: short replies, no thinking, sane timeouts."""
+    """Voice-tuned OpenAI-compatible client: short replies, no thinking, sane timeouts."""
     local = _is_local_service_url(LLM_BASE_URL)
     read_s = float(os.getenv("LLM_READ_TIMEOUT", "120" if local else "30"))
     opts: dict = {
         "max_completion_tokens": int(os.getenv("LLM_MAX_COMPLETION_TOKENS", "120")),
-        # qwen/qwen3.8-27b defaults to thinking mode on Groq — that burns the
-        # token budget before any spoken words. Instruct mode is required.
-        "reasoning_effort": os.getenv("LLM_REASONING_EFFORT", "none"),
-        "temperature": float(os.getenv("LLM_TEMPERATURE", "0.7")),
+        # Lower = steadier anchor voice, fewer rambling second sentences.
+        "temperature": float(os.getenv("LLM_TEMPERATURE", "0.5")),
         "timeout": httpx.Timeout(connect=5.0, read=read_s, write=8.0, pool=5.0),
+        # Groq free tier: a 429 retried four times in ~4s only digs the hole
+        # deeper — the session cooldown (_pause_llm) handles it. Elsewhere one
+        # retry absorbs a transient 503 without a spoken apology.
+        "max_retries": 0 if _LLM_IS_GROQ else 1,
     }
-    if "groq.com" in (LLM_BASE_URL or ""):
+    # qwen/qwen3.8-27b defaults to thinking mode on Groq — that burns the
+    # token budget before any spoken words. Instruct mode is required.
+    # Sarvam rejects reasoning_effort="none" (only low/medium/high), and its
+    # -conversations model does not think anyway, so only send it when set.
+    effort = os.getenv("LLM_REASONING_EFFORT", "none" if _LLM_IS_GROQ else "")
+    if effort:
+        opts["reasoning_effort"] = effort
+    if _LLM_IS_GROQ:
         opts["extra_body"] = {"reasoning_format": "hidden"}
     return opts
 
@@ -263,37 +291,26 @@ _TRIAL_END_SAY = (
 
 LLM_OPTS = _llm_client_options()
 
+# Groq ITPM is 7000/min. After a 429, do not fire more generate_reply calls.
+_llm_ready_at = 0.0
+
+
+def _llm_cooling() -> bool:
+    return time.monotonic() < _llm_ready_at
+
+
+def _pause_llm(seconds: float) -> None:
+    global _llm_ready_at
+    wait = max(8.0, float(seconds))
+    _llm_ready_at = max(_llm_ready_at, time.monotonic() + wait)
+    logger.info("LLM cooldown %.0fs — skip generate_reply until it expires", wait)
+
 _BASE_INSTRUCTIONS = """
-You are {anchor_name}, GenzCine's AI news anchor — live, warm, authoritative. GenzCine is a
-media platform in Mohali, Punjab, India (genzcine.com).
-
-TOOLS (required):
-- get_latest_news: fetch real headlines. Call before reporting ANY current news. Never invent headlines.
-- play_news_video: show a YouTube clip on the viewer's device. Say one short intro line first; stay quiet until notified it ended.
-
-SESSION START:
-- The opening greeting and first headlines are already spoken for you. Do not greet again.
-- Do not ask which city or state they want. Open like a live news bulletin, not an interview.
-- If the viewer later names an Indian city or state (e.g. "Jaipur", "Kerala", "Firozpur") or says "national", call get_latest_news with that location and continue the bulletin.
-- If they ask about a topic, fetch that topic. Never invent headlines.
-- The viewer may speak Hindi, Punjabi, Hinglish, or English. Understand them. If they name a city in Hindi or Punjabi (e.g. फिरोजपुर, ਫ਼ਿਰੋਜ਼ਪੁਰ), treat it as that place and fetch news.
-
-ON-AIR STYLE:
-- You are live in a news studio. Keep the bulletin going — do not wait for the viewer.
-- Headlines play automatically one after another. When the viewer speaks, answer in 1-2 short spoken sentences.
-- After answering, stay ready for follow-ups — the viewer may ask another question before headlines resume.
-- End replies naturally when helpful, e.g. "Want to know more?" or "Anything else on that story?"
-- Never narrate your plan, list options, or give a long recap. Spoken news-anchor lines only.
-- Use get_latest_news only if they ask about a topic you have not covered yet.
-- Headlines are a mix: GenzCine published, local city news, and global/national wire. Cover all three; do not stay on one type.
-- When a source is Dainik Bhaskar, Punjab Kesari, Amar Ujala, Dainik Jagran, The Hindu, Times of India, or Hindustan Times, name that paper once. If the title is in Hindi (or another Indian language) and you are speaking English, translate briefly — do not invent facts.
-- If a headline is tagged [GenzCine community], introduce it as news published by a GenzCine reporter or viewer. Do not invent extra facts beyond the title.
-- If a headline is tagged [GenzCine local], treat it as local news from the GenzCine app for the viewer's city.
-- If the viewer interrupts during a headline, stop and respond — headlines resume only after they go quiet.
-- Voice only — no bullets, emojis, or lists read verbatim.
-
-TRIAL (10 min): open strong with headlines; near 9 min mention genzcine dot com for unlimited access.
-IMPORTANT: Respond immediately and naturally — do NOT add <think> blocks, reasoning steps, or internal monologue. Spoken output only.
+You are {anchor_name}, GenzCine news anchor (Mohali, genzcine.com). Voice only — 1-2 short sentences.
+Opening already played; do not greet again or ask their city.
+Call get_latest_news before any current news; never invent. play_news_video only if they ask for a clip.
+Hindi/Punjabi/English/Hinglish: understand them. City names in any script are places, not language locks.
+No <think>, lists, or plan-narration.
 """
 
 # Session languages — Kokoro TTS lang codes: a/b (English), e, f, h, i, j, p, z.
@@ -301,10 +318,10 @@ IMPORTANT: Respond immediately and naturally — do NOT add <think> blocks, reas
 _LANGUAGES: dict[str, tuple[str, str]] = {
     "en-US": ("English", ""),
     "en-GB": ("English", "Use British English spelling and phrasing."),
-    "hi": ("Hindi", "Write Hindi in Devanagari script. Common English news and media terms "
-           "(breaking news, live, anchor, headline, exclusive) may stay in English where natural."),
-    "pa": ("Punjabi", "Write Punjabi in Gurmukhi script. Common English news terms may stay "
-           "in English where natural."),
+    "hi": ("Hindi", "Write EVERY reply in Devanagari script. Do not open with Hey, Hello, or English "
+           "sentences. Names like TINA and GenzCine may stay in English."),
+    "pa": ("Punjabi", "Write EVERY reply in Gurmukhi script. Do not open with Hey, Hello, or English "
+           "sentences. Names like TINA and GenzCine may stay in English."),
     "es": ("Spanish", ""),
     "fr": ("French", ""),
     "it": ("Italian", ""),
@@ -315,14 +332,8 @@ _LANGUAGES: dict[str, tuple[str, str]] = {
 
 def _language_addon(language: str) -> str:
     name, extra = _LANGUAGES.get(language, ("English", ""))
-    return (
-        "\n\n"
-        "SESSION LANGUAGE:\n"
-        f"Reply in {name} — headlines, comments, and questions. "
-        "If the viewer clearly asks for Hindi, Punjabi, or English, switch immediately. "
-        "Never say you are locked to one language. "
-        f"{extra}"
-    )
+    extra = f" {extra}" if extra else ""
+    return f"\nReply in {name}.{extra}\n"
 
 
 _GROUP_ADDON = (
@@ -353,6 +364,63 @@ def _trim_description(text: str, *, limit: int = 100) -> str:
     return f"{cut}..."
 
 
+def _tv_open_segments(anchor_name: str, viewer_name: str | None) -> list[tuple[str, str]]:
+    """Trilingual ident: Hindi + Punjabi on Sarvam, English on Kokoro.
+
+    The Hindi/Punjabi lines are fixed text (no viewer name) so the Sarvam PCM
+    cache serves them instantly and for free; the name goes in the English line.
+    Whole ident ≈ 8s — the old 20s version lost viewers before the first story.
+    """
+    hi = "\u0928\u092e\u0938\u094d\u0924\u0947\u0964"  # नमस्ते।
+    pa = "\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32 \u0a1c\u0a40\u0964"  # ਸਤ ਸ੍ਰੀ ਅਕਾਲ ਜੀ।
+    welcome = f"Welcome, {viewer_name}." if viewer_name else "Welcome."
+    en = (
+        f"{welcome} You're watching GenzCine — I'm {anchor_name}. "
+        "Speak Hindi, Punjabi or English. Here's today's bulletin."
+    )
+    return [("hi", hi), ("pa", pa), ("en", en)]
+
+
+def _tv_open(anchor_name: str, viewer_name: str | None, language: str) -> str:
+    """Single-language ident (used after the viewer has already switched)."""
+    if language == "hi":
+        namaste = (
+            f"\u0928\u092e\u0938\u094d\u0924\u0947 {viewer_name} \u091c\u0940\u0964"
+            if viewer_name
+            else "\u0928\u092e\u0938\u094d\u0924\u0947\u0964"
+        )
+        return (
+            f"{namaste} \u0906\u092a \u0926\u0947\u0916 \u0930\u0939\u0947 \u0939\u0948\u0902 GenzCine\u0964 "
+            f"\u092e\u0948\u0902 {anchor_name} \u0939\u0942\u0901, "
+            "\u0906\u092a\u0915\u0940 \u0932\u093e\u0907\u0935 \u0928\u094d\u092f\u0942\u091c\u093c \u090f\u0902\u0915\u0930\u0964 "
+            "\u0938\u0924 \u0936\u094d\u0930\u0940 \u0905\u0915\u093e\u0932\u0964 "
+            "\u0939\u093f\u0902\u0926\u0940, \u092a\u0902\u091c\u093e\u092c\u0940, English \u2014 "
+            "\u0906\u092a \u091c\u093f\u0938 \u092d\u093e\u0937\u093e \u092e\u0947\u0902 \u092c\u094b\u0932\u0947\u0902, \u092e\u0948\u0902 \u0909\u0938\u0940 \u092e\u0947\u0902 \u091c\u0935\u093e\u092c \u0926\u0942\u0901\u0917\u0940\u0964 "
+            "\u0906\u091c \u0915\u0940 \u0916\u092c\u0930\u094b\u0902 \u092e\u0947\u0902 \u0938\u094d\u0935\u093e\u0917\u0924 \u0939\u0948\u0964"
+        )
+    if language == "pa":
+        sat = (
+            f"\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32 {viewer_name} \u0a1c\u0a40\u0964"
+            if viewer_name
+            else "\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32 \u0a1c\u0a40\u0964"
+        )
+        return (
+            f"{sat} \u0a24\u0a41\u0a38\u0a40\u0a02 \u0a35\u0a47\u0a16 \u0a30\u0a39\u0a47 \u0a39\u0a4b GenzCine\u0964 "
+            f"\u0a2e\u0a48\u0a02 {anchor_name} \u0a39\u0a3e\u0a02, "
+            "\u0a24\u0a41\u0a39\u0a3e\u0a21\u0a40 \u0a32\u0a3e\u0a08\u0a35 \u0a28\u0a3f\u0a0a\u0a1c\u0a3c \u0a10\u0a02\u0a15\u0a30\u0964 "
+            "\u0a28\u0a2e\u0a38\u0a24\u0a47\u0964 "
+            "\u0a39\u0a3f\u0a70\u0a26\u0a40, \u0a2a\u0a70\u0a1c\u0a3e\u0a2c\u0a40, English \u2014 "
+            "\u0a24\u0a41\u0a38\u0a40\u0a02 \u0a1c\u0a3f\u0a38 \u0a2d\u0a3e\u0a38\u0a3c\u0a3e \u0a35\u0a3f\u0a71\u0a1a \u0a2c\u0a4b\u0a32\u0a4b, \u0a2e\u0a48\u0a02 \u0a09\u0a38\u0a47 \u0a35\u0a3f\u0a71\u0a1a \u0a1c\u0a35\u0a3e\u0a2c \u0a26\u0a3f\u0a06\u0a02\u0a17\u0a40\u0964 "
+            "\u0a05\u0a71\u0a1c \u0a26\u0a40\u0a06\u0a02 \u0a16\u0a3c\u0a2c\u0a30\u0a3e\u0a02 \u0a35\u0a3f\u0a71\u0a1a \u0a1c\u0a40 \u0a06\u0a07\u0a06\u0a02 \u0a28\u0a42\u0a70\u0964"
+        )
+    welcome = f"Welcome, {viewer_name}." if viewer_name else "Welcome."
+    return (
+        f"You're watching GenzCine. I'm {anchor_name}, live from the newsroom. "
+        "Hindi, Punjabi, English — speak any language, I'll follow you. "
+        f"{welcome} Here's today's bulletin."
+    )
+
+
 def _headline_spoken_line(
     anchor_name: str,
     article: dict,
@@ -368,24 +436,17 @@ def _headline_spoken_line(
         title = f"From a GenzCine reporter: {title}"
     elif article.get("provider") == "genzcine":
         title = f"From GenzCine local: {title}"
-    who = f" {viewer_name}" if viewer_name else ""
     body = f" {title}. {desc}" if desc else f" {title}."
     if language == "hi":
         if is_first:
-            greet = f"नमस्ते{who}! मैं {anchor_name} हूँ, GenzCine न्यूज़ एंकर। ये हैं आज की खबरें।"
-            return f"{greet}{body}".strip()
+            return f"पहली बड़ी खबर।{body}".strip()
         return f"{_HEADLINE_BRIDGES_HI[index % len(_HEADLINE_BRIDGES_HI)]}{body}".strip()
     if language == "pa":
         if is_first:
-            greet = (
-                f"ਸਤ ਸ੍ਰੀ ਅਕਾਲ{who}! ਮੈਂ {anchor_name} ਹਾਂ, GenzCine "
-                "ਨਿਊਜ਼ ਐਂਕਰ। ਇਹ ਹਨ ਅੱਜ ਦੀਆਂ ਖ਼ਬਰਾਂ।"
-            )
-            return f"{greet}{body}".strip()
+            return f"ਪਹਿਲੀ ਵੱਡੀ ਖ਼ਬਰ।{body}".strip()
         return f"{_HEADLINE_BRIDGES_PA[index % len(_HEADLINE_BRIDGES_PA)]}{body}".strip()
     if is_first:
-        greet = f"Hey{who}! I'm {anchor_name}, your GenzCine news anchor. This is today's news."
-        return f"{greet}{body}".strip()
+        return f"Our top story.{body}".strip()
     bridge = _HEADLINE_BRIDGES[index % len(_HEADLINE_BRIDGES)]
     return f"{bridge}{body}".strip()
 
@@ -424,6 +485,10 @@ async def _handle_agent_error(
         if room_name:
             _skip_agent_transcript[room_name] = True
         await publish_studio_event(room, info.to_studio_event(anchor_name=anchor_name))
+        if room is not None and not room.isconnected():
+            return
+        if "closing" in str(err).lower():
+            return
         await session.say(info.spoken, allow_interruptions=True)
     except Exception:
         logger.exception("agent error handler failed — last-resort fallback")
@@ -499,14 +564,66 @@ class Assistant(Agent):
         self._headline_index = 0
         self._preferred_location: str = ""  # set by user at session start
         self._tts_router: LanguageRoutedTTS | None = None
-        self._pending_spoken: str | None = None
+        self._last_whisper_lang: str | None = None
+        self._opening = False
 
-        instructions = (
-            _BASE_INSTRUCTIONS.format(anchor_name=anchor_name)
-            + _language_addon(language)
-            + (_GROUP_ADDON if session_type == "group" else "")
+        super().__init__(instructions=self._instructions_text())
+
+    def _instructions_text(self) -> str:
+        return (
+            _BASE_INSTRUCTIONS.format(anchor_name=self._anchor_name)
+            + _language_addon(self._language)
+            + (_GROUP_ADDON if self._session_type == "group" else "")
         )
-        super().__init__(instructions=instructions)
+
+    def _spoken_code(self) -> str:
+        return {"hi": "hi", "pa": "pa"}.get(self._language, "en")
+
+    async def on_user_turn_completed(
+        self, turn_ctx: lk_llm.ChatContext, new_message: lk_llm.ChatMessage
+    ) -> None:
+        """Runs once per user turn, before the LLM call — the one place to shape it.
+
+        - Whisper prompt echo / hallucination → StopResponse (no LLM, no history).
+        - City mishears fixed in the message the LLM actually sees.
+        - Language switch: TTS + instructions flip for THIS reply (no bridge
+          line, no second generate_reply, no preemptive race).
+        - "Hindi me bolo" alone → spoken confirm, no LLM call.
+        - History capped so prompt size stays flat over a long session.
+        """
+        raw = (new_message.text_content or "").strip()
+        if is_stt_garbage(raw):
+            logger.info("turn skipped (stt garbage): %r", raw[:100])
+            raise StopResponse()
+
+        text = _correct_place_transcript(raw, collapse=False)
+        if text and text != raw:
+            logger.info("STT place correction: %r → %r", raw[:80], text[:80])
+            new_message.content = [text]
+
+        heard = detect_spoken_lang(raw, self._last_whisper_lang, current=self._spoken_code())
+        switched = False
+        if heard:
+            switched = await self.apply_spoken_language(heard, update_llm=True)
+            if switched:
+                # update_instructions() persists for later turns; the LLM call for
+                # this turn uses turn_ctx, which was copied before we ran.
+                _ctx_update_instructions(
+                    turn_ctx, instructions=self._instructions_text(), add_if_missing=True
+                )
+        if switched and is_language_switch_only(text):
+            bridge = language_bridge(heard)
+            logger.info("language switch only → bridge, no LLM")
+            if bridge:
+                await self._say_language(heard, bridge, wait=False)
+            raise StopResponse()
+
+        # Cap persisted history. The copy for this turn is already made, so this
+        # takes effect from the next turn and never invalidates preemptive work.
+        if len(self.chat_ctx.items) > LLM_HISTORY_MAX_ITEMS + 4:
+            trimmed = self.chat_ctx.copy()
+            trimmed.truncate(max_items=LLM_HISTORY_MAX_ITEMS)
+            await self.update_chat_ctx(trimmed)
 
     async def _publish_studio(self, event: dict) -> None:
         await publish_studio_event(self._room, event)
@@ -564,43 +681,91 @@ class Assistant(Agent):
             language=self._language,
         )
         await self._publish_headline_now()
-        await self.session.say(text, allow_interruptions=True)
+        await self._safe_say(text)
         return True
 
-    async def apply_spoken_language(self, code: str) -> None:
-        """Switch Kokoro/Sarvam TTS and LLM script from STT auto-detect."""
-        mapped = {"en": "en-US", "hi": "hi", "pa": "pa"}.get(code)
-        if not mapped or mapped not in _LANGUAGES:
-            return
-        if mapped == self._language:
+    def _can_speak(self) -> bool:
+        room = self._room
+        if room is not None and not room.isconnected():
+            return False
+        return True
+
+    async def _safe_say(self, text: str, *, wait: bool = True, **kwargs) -> bool:
+        """session.say that no-ops if the viewer already left. wait=False just queues it."""
+        line = (text or "").strip()
+        if not line or not self._can_speak():
+            return False
+        try:
+            handle = self.session.say(line, allow_interruptions=True, **kwargs)
+            if wait:
+                await handle
+            return True
+        except RuntimeError as exc:
+            if "closing" in str(exc).lower():
+                logger.info("say skipped — session closing")
+                return False
+            raise
+
+    async def _say_language(self, code: str, text: str, *, wait: bool = True) -> None:
+        """Speak one line on the correct engine. Hindi/Punjabi never go to Kokoro."""
+        line = (text or "").strip()
+        if not line or not self._can_speak():
             return
         router = self._tts_router
         if router is not None:
             if code in {"hi", "pa"} and router._indic is None:
-                logger.info("heard %s but Sarvam key missing — keep Kokoro English", code)
+                logger.warning("skip %s line — Sarvam missing, not falling back to Kokoro", code)
                 return
             router.set_spoken(code)
+            logger.info("say lang=%s tts=%s chars=%d", code, router.engine, len(line))
+        await self._safe_say(line, wait=wait)
+
+    async def _speak_trilingual_open(self, viewer_name: str | None) -> None:
+        """Namaste (Sarvam hi) → Sat Sri Akal (Sarvam pa) → English ident (Kokoro)."""
+        for code, line in _tv_open_segments(self._anchor_name, viewer_name):
+            if not self._can_speak():
+                return
+            await self._say_language(code, line)
+        if self._tts_router is not None:
+            self._tts_router.set_spoken("en")
+
+    def _spoken_mapped(self, code: str) -> str | None:
+        mapped = {"en": "en-US", "hi": "hi", "pa": "pa"}.get(code)
+        if mapped and mapped in _LANGUAGES:
+            return mapped
+        return None
+
+    async def _commit_language_instructions(self) -> None:
+        """Push the session-language addon to the LLM. Call after TTS is already switched."""
+        await self.update_instructions(self._instructions_text())
+
+    async def apply_spoken_language(self, code: str, *, update_llm: bool = True) -> bool:
+        """Switch Kokoro/Sarvam TTS and (optionally) the LLM language addon.
+
+        Only call from on_user_turn_completed for live switches — there LiveKit
+        applies it to the reply being generated instead of racing it.
+        """
+        mapped = self._spoken_mapped(code)
+        if not mapped:
+            return False
+        if mapped == self._language:
+            return False
+        router = self._tts_router
+        if router is not None:
+            if code in {"hi", "pa"} and router._indic is None:
+                logger.info("heard %s but Sarvam key missing — keep Kokoro English", code)
+                return False
+            router.set_spoken(code)
         self._language = mapped
-        instructions = (
-            _BASE_INSTRUCTIONS.format(anchor_name=self._anchor_name)
-            + _language_addon(mapped)
-            + (_GROUP_ADDON if self._session_type == "group" else "")
-        )
-        await self.update_instructions(instructions)
+        if update_llm:
+            await self._commit_language_instructions()
         engine = router.engine if router is not None else "unknown"
-        logger.info("spoken language → %s tts=%s", mapped, engine)
+        logger.info("spoken language → %s tts=%s llm_updated=%s", mapped, engine, update_llm)
+        return True
 
     @function_tool
     async def get_latest_news(self, context: RunContext, topic: str = "") -> str:
-        """Fetch real, live news headlines — optionally filtered by topic.
-
-        Always call this before reporting anything as current news; never invent
-        headlines. Call again whenever the viewer asks about a new subject.
-
-        Args:
-            topic: Optional subject to search for (e.g. "technology", "cricket",
-                "stock market", "Bollywood"). Leave empty for general top headlines.
-        """
+        """Fetch live headlines. Call before reporting news. topic: city or subject, or empty."""
         if topic:
             self._preferred_location = (
                 news_query_for(_correct_place_transcript(topic.strip())) or ""
@@ -626,30 +791,18 @@ class Assistant(Agent):
             )
         await self._publish_headlines(articles, topic=topic or "")
         lines = []
-        for a in articles:
+        for a in articles[:4]:
+            tag = ""
             if a.get("provider") == "community":
-                tag = " [GenzCine community]"
+                tag = " [GenzCine]"
             elif a.get("provider") == "genzcine":
-                tag = " [GenzCine local]"
-            else:
-                tag = ""
+                tag = " [local]"
             lines.append(f"- {a['title']} ({a['source']}){tag}")
-        return (
-            "Headlines fetched (titles only — expand briefly when speaking, do not invent):\n"
-            + "\n".join(lines)
-        )
+        return "Headlines:\n" + "\n".join(lines)
 
     @function_tool
     async def play_news_video(self, context: RunContext, topic: str) -> str:
-        """Find and play a real, relevant video clip full-screen on the viewer's device.
-
-        Call this when the viewer asks to see footage, or when a story is clearly
-        visual and a real clip would land better than a verbal description.
-
-        Args:
-            topic: What the video should be about (e.g. "SpaceX launch highlights",
-                "India vs Australia match highlights").
-        """
+        """Play a YouTube clip on the viewer's screen. topic: what to search."""
         if self._room is None:
             return "Video playback unavailable right now — continue reporting verbally."
         result = await search_news_video(topic)
@@ -727,19 +880,37 @@ class Assistant(Agent):
             else:
                 viewer_name = participant_names[0] if participant_names else None
 
-            opened = await self._deliver_headline_via_tts(
-                is_first=True, viewer_name=viewer_name
-            )
-            if opened:
-                await self._deliver_headline_via_tts(is_first=False)
-            else:
-                who = f" {viewer_name}" if viewer_name else ""
-                await self.session.say(
-                    f"Hey{who}! I'm {self._anchor_name}, your GenzCine news anchor. "
-                    "This is today's news — I'll bring you the latest as it comes in.",
-                    allow_interruptions=True,
+            self._opening = True
+            try:
+                await self._speak_trilingual_open(viewer_name)
+                if not self._can_speak():
+                    logger.info("[%s] on_enter stopped — viewer left during intro", self._session_type)
+                    return
+                opened = await self._deliver_headline_via_tts(
+                    is_first=True, viewer_name=viewer_name
                 )
+                if opened:
+                    await self._deliver_headline_via_tts(is_first=False)
+                elif self._can_speak():
+                    await self._say_language("en", "I'll bring you the latest as it comes in.")
+            finally:
+                self._opening = False
+        except RuntimeError as exc:
+            if "closing" in str(exc).lower():
+                logger.info("[%s] on_enter stopped — session closing", self._session_type)
+                return
+            logger.exception("[%s] on_enter failed — attempting fallback greeting", self._session_type)
+            await _handle_agent_error(
+                self.session,
+                self._room,
+                exc,
+                reason="on_enter_exception",
+                anchor_name=self._anchor_name,
+            )
         except Exception as exc:
+            if not self._can_speak():
+                logger.info("[%s] on_enter stopped — viewer left", self._session_type)
+                return
             logger.exception("[%s] on_enter failed — attempting fallback greeting", self._session_type)
             await _handle_agent_error(
                 self.session,
@@ -851,8 +1022,12 @@ async def my_agent(ctx: JobContext) -> None:
                 "max_delay": 1.2,
             },
             "preemptive_generation": {
-                "enabled": True,
-                "preemptive_tts": not _use_simli,
+                # Starts the LLM on the final STT text while the turn detector is
+                # still deciding — saves the 0.2-1.2s endpointing wait. A wasted
+                # call is ~₹0.03 on Sarvam, but on Groq's free tier it is a third
+                # of the per-minute token budget, so keep it off there.
+                "enabled": not _LLM_IS_GROQ,
+                "preemptive_tts": False,
             },
         },
     )
@@ -933,6 +1108,9 @@ async def my_agent(ctx: JobContext) -> None:
             if "TTS" in err_type or "TTS" in source_name:
                 return  # can't speak if TTS itself is down
             now = time.monotonic()
+            info = classify_agent_error(err or err_type, source=source_name)
+            if info.code == "llm_rate_limit":
+                _pause_llm(info.retry_after_seconds)
             if now - _last_error_say_at < 45.0:
                 return
             _last_error_say_at = now
@@ -1083,12 +1261,9 @@ async def my_agent(ctx: JobContext) -> None:
         clean = transcript.strip()
         if not clean:
             return
-        pending = agent._pending_spoken
-        if pending:
-            try:
-                await agent.apply_spoken_language(pending)
-            except Exception:
-                logger.exception("spoken language switch failed")
+        if _llm_cooling():
+            logger.info("LLM cooldown — skip reply nudge")
+            return
         for attempt in range(REPLY_NUDGE_RETRIES):
             delay = REPLY_NUDGE_DELAY_SECONDS if attempt == 0 else REPLY_NUDGE_RETRY_GAP_SECONDS
             try:
@@ -1110,7 +1285,18 @@ async def my_agent(ctx: JobContext) -> None:
                 clean[:120],
             )
             try:
-                await session.generate_reply(user_input=clean, allow_interruptions=True)
+                # If LiveKit already committed this line to history, do not add
+                # it again — a duplicate user turn doubles the prompt for nothing.
+                last_user = next(
+                    (m for m in reversed(session.history.items)
+                     if getattr(m, "role", None) == "user"),
+                    None,
+                )
+                already = bool(last_user) and (last_user.text_content or "").strip() == clean
+                if already:
+                    await session.generate_reply(allow_interruptions=True)
+                else:
+                    await session.generate_reply(user_input=clean, allow_interruptions=True)
                 _bc["agent_responding_to_user"] = True
                 return
             except Exception:
@@ -1123,30 +1309,29 @@ async def my_agent(ctx: JobContext) -> None:
             task.cancel()
 
     def _on_user_input_transcribed(ev) -> None:
+        # Bulletin/pause bookkeeping only. Language switch, place correction and
+        # garbage filtering for the LLM happen in Assistant.on_user_turn_completed.
         try:
             if not ev.is_final:
                 return
             raw_transcript = (ev.transcript or "").strip()
-            text = _correct_place_transcript(raw_transcript)
-            if text and text != raw_transcript:
-                logger.info("STT place correction: %r → %r", raw_transcript[:80], text)
             whisper_lang = getattr(ev, "language", None)
-            heard = detect_spoken_lang(
-                raw_transcript, whisper_lang if isinstance(whisper_lang, str) else None
-            )
-            if heard:
-                logger.info("STT language hint: whisper=%r detected=%s", whisper_lang, heard)
-                agent._pending_spoken = heard
-                if agent._tts_router is not None:
-                    agent._tts_router.set_spoken(heard)
-                asyncio.create_task(agent.apply_spoken_language(heard))
+            agent._last_whisper_lang = whisper_lang if isinstance(whisper_lang, str) else None
+            if agent._opening or is_stt_garbage(raw_transcript):
+                logger.info("STT ignored (intro/garbage): %r", raw_transcript[:120])
+                return
+            text = _correct_place_transcript(raw_transcript, collapse=False)
             if text:
-                logger.info("mic STT final: %r", text[:120])
+                logger.info("mic STT final (whisper=%s): %r", whisper_lang, text[:120])
                 _bc["user_turn_active"] = True
                 _bc["paused"] = True
                 _cancel_conversation_idle()
+                place = extract_place(text)
                 asyncio.create_task(
-                    _warm_headline_cache(agent, text if not agent._preferred_location else None)
+                    _warm_headline_cache(
+                        agent,
+                        place if place and not agent._preferred_location else None,
+                    )
                 )
                 if not _bc["conversation_mode"]:
                     asyncio.create_task(_enter_conversation_mode())
@@ -1158,7 +1343,8 @@ async def my_agent(ctx: JobContext) -> None:
                     item_id=ev.item_id or "",
                 )
             )
-            if text:
+            if text and not is_language_switch_only(text):
+                # Safety net only — LiveKit's own end-of-turn reply is the main path.
                 _cancel_reply_nudge()
                 _bc["reply_nudge_task"] = asyncio.create_task(_nudge_user_reply(text))
         except Exception:
@@ -1209,8 +1395,8 @@ async def my_agent(ctx: JobContext) -> None:
             "anchorName": anchor_name,
             "language": language,
             "sessionType": session_type,
-            "title": "You're live with " + anchor_name,
-            "message": "Your AI news anchor is ready. Say hello or wait for today's headlines.",
+            "title": "You're watching GenzCine with " + anchor_name,
+            "message": "Hindi, Punjabi, English — speak any language. Today's bulletin is starting.",
         },
     )
 

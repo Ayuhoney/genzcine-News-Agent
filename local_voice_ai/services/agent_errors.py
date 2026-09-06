@@ -45,11 +45,14 @@ def classify_agent_error(err: Any, *, source: str = "") -> AgentErrorInfo:
     source_l = source.lower()
     combined = f"{source_l} {text}"
 
-    if any(x in combined for x in ("429", "rate limit", "rate_limit", "tokens per day", "tpd")):
-        retry = 180
-        m = re.search(r"try again in (\d+)m", text)
-        if m:
-            retry = int(m.group(1)) * 60
+    if any(x in combined for x in ("429", "rate limit", "rate_limit", "tokens per day", "tpd", "itpm")):
+        retry = 20
+        m_min = re.search(r"try again in (\d+)m", text)
+        m_sec = re.search(r"try again in ([\d.]+)\s*s", text)
+        if m_min:
+            retry = int(m_min.group(1)) * 60
+        elif m_sec:
+            retry = max(15, int(float(m_sec.group(1))) + 5)
         return AgentErrorInfo(
             code="llm_rate_limit",
             title="High demand right now",

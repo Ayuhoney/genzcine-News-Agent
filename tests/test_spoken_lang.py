@@ -1,4 +1,10 @@
-from local_voice_ai.services.spoken_lang import detect_spoken_lang
+from local_voice_ai.services.spoken_lang import (
+    detect_spoken_lang,
+    is_language_switch_only,
+    is_stt_garbage,
+    language_bridge,
+    tts_lang_for_text,
+)
 
 
 def test_devanagari_is_hindi() -> None:
@@ -62,3 +68,100 @@ def test_continue_in_english_switches_back() -> None:
 
 def test_english_news_without_whisper_does_not_flip() -> None:
     assert detect_spoken_lang("Tell us about Delhi news.") is None
+
+
+def test_punjab_place_is_not_punjabi_language() -> None:
+    assert detect_spoken_lang("Punjab") is None
+    assert detect_spoken_lang("All of these are Punjabi.") is None
+    assert detect_spoken_lang("If the speaker is Punjabi, transcribe in Devanagari.") is None
+
+
+def test_whisper_prompt_leak_is_garbage() -> None:
+    leak = "If the speaker is Punjabi, transcribe in Ddevanagari. Sat Sri Akal is always Punjabi."
+    assert is_stt_garbage(leak)
+    assert detect_spoken_lang(leak) is None
+    assert is_stt_garbage("Thank you for watching!")
+    assert detect_spoken_lang("Thank you for watching!") is None
+    assert not is_stt_garbage("Sat Sri Akal Tina")
+    assert detect_spoken_lang("Sat Sri Akal Tina") == "pa"
+
+
+def test_explicit_speak_punjabi_still_switches() -> None:
+    assert detect_spoken_lang("Speak Punjabi") == "pa"
+    assert detect_spoken_lang("punjabi mein bolo") == "pa"
+
+
+def test_speak_english_with_me_switches_back() -> None:
+    assert detect_spoken_lang("No, can you still speak English with me?") == "en"
+
+
+def test_hinglish_news_is_hindi() -> None:
+    assert detect_spoken_lang("Mujhe Aashika Nepal ka news batao.") == "hi"
+
+
+def test_switch_only_phrases() -> None:
+    assert is_language_switch_only("No, can you still speak English with me?")
+    assert is_language_switch_only("\u062a\u0645 \u0645\u062c\u06be\u06d2 \u06c1\u0646\u062f\u06cc \u0645\u06cc\u06ba \u0633\u0646 \u0633\u06a9\u062a\u06cc \u06c1\u0648")
+    assert not is_language_switch_only("Mujhe Aashika Nepal ka news batao.")
+    assert not is_language_switch_only("\u092e\u0941\u091d\u0947 \u0926\u093f\u0932\u094d\u0932\u0940 \u0915\u0940 \u0916\u092c\u0930 \u0926\u094b")
+
+
+def test_language_bridge_is_native_script() -> None:
+    assert "\u0939\u093f\u0902\u0926\u0940" in language_bridge("hi")
+    assert "\u0a2a\u0a70\u0a1c\u0a3e\u0a2c\u0a40" in language_bridge("pa")
+    assert "English" in language_bridge("en")
+
+
+def test_tts_lang_script_is_strict() -> None:
+    assert tts_lang_for_text("\u0928\u092e\u0938\u094d\u0924\u0947", "en") == "hi"
+    assert tts_lang_for_text("\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32", "en") == "pa"
+    assert tts_lang_for_text("You're watching GenzCine.", "en") == "en"
+    assert tts_lang_for_text("TINA", "hi") == "hi"
+
+
+def test_intro_segments_use_native_scripts() -> None:
+    from local_voice_ai.agent import _tv_open_segments
+
+    segs = _tv_open_segments("TINA", None)
+    assert [c for c, _ in segs] == ["hi", "pa", "en"]
+    assert tts_lang_for_text(segs[0][1], "en") == "hi"
+    assert tts_lang_for_text(segs[1][1], "en") == "pa"
+    assert tts_lang_for_text(segs[2][1], "en") == "en"
+    assert "\u0928\u092e\u0938\u094d\u0924\u0947" in segs[0][1]
+    assert "\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32" in segs[1][1]
+    # Hindi/Punjabi lines must not carry the viewer name — they are cache keys.
+    named = _tv_open_segments("TINA", "Ayush")
+    assert named[0][1] == segs[0][1] and named[1][1] == segs[1][1]
+    assert "Ayush" in named[2][1]
+
+
+def test_whisper_label_alone_needs_enough_words() -> None:
+    # Hindi session, viewer says a city name that Whisper tags en → stay Hindi.
+    assert detect_spoken_lang("Mohali", "en", current="hi") is None
+    assert detect_spoken_lang("Delhi news", "en-US", current="hi") is None
+    # A real English sentence does move the session.
+    assert detect_spoken_lang("What is happening in Delhi today", "en", current="hi") == "en"
+    # Same language as current is never blocked.
+    assert detect_spoken_lang("Mohali", "hi", current="hi") == "hi"
+    # Script / explicit phrases still win regardless of length.
+    assert detect_spoken_lang("\u092e\u094b\u0939\u093e\u0932\u0940", "en", current="en") == "hi"
+    assert detect_spoken_lang("in english", "hi", current="hi") == "en"
+
+
+def test_sentence_splitter_streams_per_sentence() -> None:
+    from local_voice_ai.services.sarvam_tts import split_complete_sentences
+
+    done, rest = split_complete_sentences("Our top story. Punjab CM announces relief. Officials say")
+    assert done == ["Our top story.", "Punjab CM announces relief."]
+    assert rest == "Officials say"
+    # Hindi danda is a boundary; a short bridge merges into the next sentence.
+    done, rest = split_complete_sentences(
+        "\u0905\u0917\u0932\u0940 \u0916\u092c\u0930\u0964 Punjab CM announces flood relief. More soon"
+    )
+    assert done == ["\u0905\u0917\u0932\u0940 \u0916\u092c\u0930\u0964 Punjab CM announces flood relief."]
+    assert rest == "More soon"
+    # Decimals and abbreviations do not split.
+    done, rest = split_complete_sentences("Rs. 1.5 crore was released by Dr. Singh today. Next")
+    assert done == ["Rs. 1.5 crore was released by Dr. Singh today."]
+    assert rest == "Next"
+    assert split_complete_sentences("no boundary yet") == ([], "no boundary yet")
