@@ -260,12 +260,13 @@ TOOLS (required):
 - play_news_video: show a YouTube clip on the viewer's device. Say one short intro line first; stay quiet until notified it ended.
 
 SESSION START:
-- You have already asked the viewer which city or region they want news for.
-- As soon as they answer with any Indian city or state (e.g. "Jaipur", "Kerala", "Firozpur") or "national", call get_latest_news with that location as the topic, then immediately start the bulletin — no further questions.
-- If they say something vague like "anything" or "you decide", call get_latest_news with topic="" for national headlines and start the bulletin.
+- The opening greeting and first headlines are already spoken for you. Do not greet again.
+- Do not ask which city or state they want. Open like a live news bulletin, not an interview.
+- If the viewer later names an Indian city or state (e.g. "Jaipur", "Kerala", "Firozpur") or says "national", call get_latest_news with that location and continue the bulletin.
+- If they ask about a topic, fetch that topic. Never invent headlines.
 
 ON-AIR STYLE:
-- You are live in a news studio. After the location is set, keep the bulletin going — do not wait for the viewer.
+- You are live in a news studio. Keep the bulletin going — do not wait for the viewer.
 - Headlines play automatically one after another. When the viewer speaks, answer in 1-2 short spoken sentences.
 - After answering, stay ready for follow-ups — the viewer may ask another question before headlines resume.
 - End replies naturally when helpful, e.g. "Want to know more?" or "Anything else on that story?"
@@ -669,18 +670,20 @@ class Assistant(Agent):
             asyncio.create_task(_warm_headline_cache(self))
 
             if self._session_type == "group":
-                name_list = ", ".join(participant_names) if participant_names else "everyone"
-                await self.session.say(
-                    f"Hey {name_list}! I'm {self._anchor_name}. "
-                    "Which Indian city or state do you want — or say national?",
-                    allow_interruptions=True,
-                )
+                viewer_name = ", ".join(participant_names) if participant_names else "everyone"
             else:
                 viewer_name = participant_names[0] if participant_names else None
+
+            opened = await self._deliver_headline_via_tts(
+                is_first=True, viewer_name=viewer_name
+            )
+            if opened:
+                await self._deliver_headline_via_tts(is_first=False)
+            else:
                 who = f" {viewer_name}" if viewer_name else ""
                 await self.session.say(
-                    f"Hey{who}! I'm {self._anchor_name}. "
-                    "Which Indian city or state do you want — or say national?",
+                    f"Hey{who}! I'm {self._anchor_name}, your GenzCine news anchor. "
+                    "This is today's news — I'll bring you the latest as it comes in.",
                     allow_interruptions=True,
                 )
         except Exception as exc:
