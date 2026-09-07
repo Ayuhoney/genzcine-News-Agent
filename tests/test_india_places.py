@@ -8,6 +8,7 @@ from local_voice_ai.services.india_places import (
     IN_UTS,
     all_place_names,
     aliases_for,
+    extract_place,
     is_national_query,
     news_query_for,
 )
@@ -91,3 +92,9 @@ def test_rss_stays_india_for_every_state():
 def test_aliases_for_unknown_keeps_raw_keyword():
     assert aliases_for("Fooville") == ("fooville",)
     assert "jaisalmer" in aliases_for("Jaisalmer")
+
+
+def test_extract_place_native_scripts() -> None:
+    assert extract_place("मुझे फिरोजपुर की खबर बताओ") == "Firozpur"
+    assert extract_place("ਮੋਹਾਲੀ ਦੀ ਖ਼ਬਰ") == "Mohali"
+    assert extract_place("दिल्ली की खबर") == "Delhi"

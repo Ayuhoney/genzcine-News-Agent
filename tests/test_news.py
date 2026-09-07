@@ -260,7 +260,7 @@ async def test_fetch_latest_news_puts_community_first(monkeypatch):
             }
         ]
 
-    async def fake_newsdata(*_args, **_kwargs):
+    async def fake_global(*_args, **_kwargs):
         return [
             {
                 "title": "Delhi, Mumbai to see more rain on Saturday",
@@ -275,13 +275,13 @@ async def test_fetch_latest_news_puts_community_first(monkeypatch):
     async def fake_rss(*_args, **_kwargs):
         return []
 
-    async def fake_youtube(*_args, **_kwargs):
+    async def fake_official(*_args, **_kwargs):
         return []
 
     monkeypatch.setattr("local_voice_ai.services.news._fetch_published_news", fake_community)
-    monkeypatch.setattr("local_voice_ai.services.news._fetch_newsdata", fake_newsdata)
+    monkeypatch.setattr("local_voice_ai.services.news._fetch_global_newsdata", fake_global)
     monkeypatch.setattr("local_voice_ai.services.news._fetch_google_rss", fake_rss)
-    monkeypatch.setattr("local_voice_ai.services.news._fetch_youtube_headlines", fake_youtube)
+    monkeypatch.setattr("local_voice_ai.services.news._fetch_official_paper_rss", fake_official)
 
     _HEADLINE_CACHE.clear()
     articles = await fetch_latest_news(language="en-US", limit=2)
