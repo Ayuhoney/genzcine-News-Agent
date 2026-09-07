@@ -151,8 +151,10 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 # ── token minting ──────────────────────────────────────────────────────────────
-# Kokoro-supported session languages offered in the UI
-_SUPPORTED_LANGUAGES = {"en-US", "en-GB", "es", "fr", "it", "pt-BR", "zh"}
+# Sarvam Bulbul + Sarvam-105B intersection (Whisper STT covers all of these)
+_SUPPORTED_LANGUAGES = {
+    "en-US", "en-GB", "hi", "pa", "bn", "ta", "te", "kn", "ml", "mr", "gu", "od",
+}
 
 
 def _mint_token(
@@ -387,7 +389,7 @@ def build_app(cfg: Config) -> FastAPI:
         # voice — kokoro TTS voice id (e.g. af_nova, am_michael)
         voice: str = body.get("voice", "") or ""
 
-        # language — session language (whitelist, kokoro-supported)
+        # language — session language (Sarvam Bulbul / 105B whitelist)
         language = body.get("language", "en-US")
         if language not in _SUPPORTED_LANGUAGES:
             language = "en-US"

@@ -1,9 +1,10 @@
-"""Sarvam Bulbul v3 (Hindi/Punjabi) + Kokoro (English) behind one LiveKit TTS.
+"""Sarvam Bulbul v3 — sole TTS for all session languages (en/hi/pa/bn/…).
 
-Sentence-streamed: every finished sentence goes to its engine the moment the
-LLM emits it, and the next sentence is synthesized while the current one plays.
-Fixed lines (intro, bridges, headline bridges) come from a PCM disk cache —
-zero Sarvam latency and zero Sarvam cost after the first play.
+Sentence-streamed: every finished sentence is synthesized the moment the LLM
+emits it, and the next sentence starts after first audio of the current one.
+Fixed lines (intro, bridges) come from a PCM disk cache — zero latency/cost
+after the first play. One speaker (Priya) across every language = smooth
+voice-matched transitions.
 """
 
 from __future__ import annotations
@@ -21,22 +22,23 @@ import httpx
 from livekit.agents import APIConnectionError, APIStatusError, tts
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions
 
-from .spoken_lang import has_sarvam_script, tts_lang_for_text
+from .spoken_lang import (
+    SARVAM_LANGS,
+    SARVAM_TTS_CODE,
+    has_sarvam_script,
+    script_glue,
+    tts_lang_for_text,
+)
 
 logger = logging.getLogger("agent")
 
 _SARVAM_HTTP = "https://api.sarvam.ai/text-to-speech/stream"
 _SARVAM_MODEL = "bulbul:v3"
 _SAMPLE_RATE = 24000
-_LANG = {"hi": "hi-IN", "pa": "pa-IN"}
-_SCRIPT_GLUE = {"hi": "\u091c\u0940\u0964 ", "pa": "\u0a1c\u0a40\u0964 "}
 
-# Sentence boundary: terminal punctuation (Latin, danda, Urdu) + optional closing
-# quote, followed by whitespace. Decimal points ("1.5") never match — no space.
 _SENT_END = re.compile(r"(?<=[.!?\u0964\u061f])[\"'\u201d\u2019)]?\s+")
 _ABBREV = re.compile(r"\b(?:Dr|Mr|Mrs|Ms|St|No|Rs|vs|Lt|Gen|Col)\.$", re.IGNORECASE)
 _MIN_SENTENCE_CHARS = 12
-# Playback pipeline: one sentence playing + this many already being synthesized.
 _PREFETCH = 1
 
 
@@ -46,7 +48,6 @@ def split_complete_sentences(buffer: str) -> tuple[list[str], str]:
     start = 0
     for m in _SENT_END.finditer(buffer):
         head = buffer[start : m.start()].strip()
-        # Too short to be worth a request, or an abbreviation — merge into the next one.
         if len(head) < _MIN_SENTENCE_CHARS or _ABBREV.search(head):
             continue
         out.append(head)
@@ -84,7 +85,7 @@ class _PcmCache:
             if p.is_file():
                 data = p.read_bytes()
                 if data:
-                    os.utime(p, None)  # LRU touch
+                    os.utime(p, None)
                     return data
         except Exception:
             pass
@@ -122,7 +123,7 @@ class SarvamTTS(tts.TTS):
         *,
         api_key: str,
         speaker: str = "priya",
-        language: str = "hi",
+        language: str = "en",
         cache_dir: str | None = None,
     ) -> None:
         super().__init__(
@@ -132,7 +133,7 @@ class SarvamTTS(tts.TTS):
         )
         self._api_key = api_key
         self._speaker = speaker
-        self._language = language if language in _LANG else "hi"
+        self._language = language if language in SARVAM_TTS_CODE else "en"
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=5.0),
             follow_redirects=True,
@@ -141,11 +142,11 @@ class SarvamTTS(tts.TTS):
         self._cache = _PcmCache(cache_dir or os.getenv("SARVAM_TTS_CACHE_DIR", "/models/sarvam_tts_cache"))
 
     def set_language(self, language: str) -> None:
-        if language in _LANG:
+        if language in SARVAM_TTS_CODE:
             self._language = language
 
     def cache_key(self, text: str, language: str) -> str:
-        return f"{_SARVAM_MODEL}|{self._speaker}|{_LANG.get(language, 'hi-IN')}|{text}"
+        return f"{_SARVAM_MODEL}|{self._speaker}|{SARVAM_TTS_CODE.get(language, 'en-IN')}|{text}"
 
     def synthesize(
         self,
@@ -183,7 +184,7 @@ class _SarvamChunkedStream(tts.ChunkedStream):
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         text = (self.input_text or "").strip()
         language = self._tts._language
-        lang = _LANG.get(language, "hi-IN")
+        lang = SARVAM_TTS_CODE.get(language, "en-IN")
         output_emitter.initialize(
             request_id=str(uuid.uuid4()),
             sample_rate=_SAMPLE_RATE,
@@ -208,9 +209,10 @@ class _SarvamChunkedStream(tts.ChunkedStream):
         try:
             resp = await self._request(text, lang)
             if resp.status_code == 422 and not has_sarvam_script(text, language):
-                # Bulbul occasionally rejects Latin-only lines — retry with a native glue.
-                await resp.aclose()
-                resp = await self._request(_SCRIPT_GLUE.get(language, _SCRIPT_GLUE["hi"]) + text, lang)
+                glue = script_glue(language)
+                if glue:
+                    await resp.aclose()
+                    resp = await self._request(glue + text, lang)
             if resp.status_code >= 400:
                 err = (await resp.aread())[:400]
                 raise APIStatusError(
@@ -243,47 +245,37 @@ class _SarvamChunkedStream(tts.ChunkedStream):
 
 
 class LanguageRoutedTTS(tts.TTS):
-    """Kokoro (English) or Sarvam (Hindi/Punjabi), chosen per sentence by script."""
+    """Sarvam-only streaming TTS. Per-sentence language from script / session."""
 
-    def __init__(self, *, english: tts.TTS, indic: SarvamTTS | None) -> None:
+    def __init__(self, *, sarvam: SarvamTTS) -> None:
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=True),
-            sample_rate=english.sample_rate,
-            num_channels=english.num_channels,
+            sample_rate=sarvam.sample_rate,
+            num_channels=sarvam.num_channels,
         )
-        self._english = english
-        self._indic = indic
+        self._sarvam = sarvam
         self.spoken = "en"
 
     @property
     def engine(self) -> str:
-        if self.spoken in _LANG and self._indic is not None:
-            return f"sarvam:{self.spoken}"
-        return "kokoro"
+        return f"sarvam:{self.spoken}"
+
+    # Back-compat for older agent checks that looked at _indic.
+    @property
+    def _indic(self) -> SarvamTTS:
+        return self._sarvam
 
     def set_spoken(self, language: str) -> bool:
-        code = language if language in {"en", "hi", "pa"} else "en"
-        if code in _LANG and self._indic is None:
-            logger.warning(
-                "Sarvam TTS requested (%s) but SARVAM_API_KEY is unset — staying on Kokoro",
-                code,
-            )
-            return False
+        code = language if language in SARVAM_LANGS else "en"
         changed = code != self.spoken
         self.spoken = code
-        if self._indic is not None and code in _LANG:
-            self._indic.set_language(code)
+        self._sarvam.set_language(code)
         return changed
 
-    def _active(self, text: str | None = None) -> tts.TTS:
-        """Hindi/Punjabi script or spoken lang → Sarvam. Otherwise Kokoro."""
-        if self._indic is None:
-            return self._english
+    def _lang_for(self, text: str | None = None) -> str:
         lang = tts_lang_for_text(text or "", self.spoken)
-        if lang in _LANG:
-            self._indic.set_language(lang)
-            return self._indic
-        return self._english
+        self._sarvam.set_language(lang)
+        return lang
 
     def synthesize(
         self,
@@ -291,32 +283,29 @@ class LanguageRoutedTTS(tts.TTS):
         *,
         conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
     ) -> tts.ChunkedStream:
-        return self._active(text).synthesize(text, conn_options=conn_options)
+        self._lang_for(text)
+        return self._sarvam.synthesize(text, conn_options=conn_options)
 
     def stream(
         self, *, conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS
     ) -> tts.SynthesizeStream:
-        return _RoutedSynthesizeStream(router=self, conn_options=conn_options)
+        return _SarvamSynthesizeStream(router=self, conn_options=conn_options)
 
     async def aclose(self) -> None:
-        if self._indic is not None:
-            await self._indic.aclose()
-        await self._english.aclose()
+        await self._sarvam.aclose()
 
 
-class _RoutedSynthesizeStream(tts.SynthesizeStream):
-    """LLM tokens → sentences → per-sentence engine, with one sentence prefetched."""
+class _SarvamSynthesizeStream(tts.SynthesizeStream):
+    """LLM tokens → sentences → Sarvam, with one sentence prefetched."""
 
     def __init__(self, *, router: LanguageRoutedTTS, conn_options: APIConnectOptions) -> None:
         super().__init__(tts=router, conn_options=conn_options)
         self._router = router
 
     def _start(self, sentence: str) -> tts.ChunkedStream:
-        engine = self._router._active(sentence)
-        name = "sarvam" if engine is self._router._indic else "kokoro"
-        logger.info("TTS sentence → %s chars=%d", name, len(sentence))
-        # ChunkedStream fires the HTTP request on construction — that is the prefetch.
-        return engine.synthesize(sentence)
+        lang = self._router._lang_for(sentence)
+        logger.info("TTS sentence → sarvam:%s chars=%d", lang, len(sentence))
+        return self._router._sarvam.synthesize(sentence)
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         output_emitter.initialize(
@@ -328,12 +317,8 @@ class _RoutedSynthesizeStream(tts.SynthesizeStream):
         )
         output_emitter.start_segment(segment_id=str(uuid.uuid4()))
 
-        # Backpressure: the sentence being played + _PREFETCH being synthesized.
-        # Kokoro runs 2 CPU workers, so more in flight only slows the first one.
         slots = asyncio.Semaphore(1 + _PREFETCH)
         queue: asyncio.Queue[tts.ChunkedStream | None] = asyncio.Queue()
-        # Do not start the next request until the current one has produced its
-        # first audio — time-to-first-byte of what plays now beats the prefetch.
         first_audio = asyncio.Event()
         first_audio.set()
 
@@ -388,12 +373,11 @@ class _RoutedSynthesizeStream(tts.SynthesizeStream):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            raise APIConnectionError(f"Routed TTS stream failed: {exc}") from exc
+            raise APIConnectionError(f"Sarvam TTS stream failed: {exc}") from exc
         finally:
             for t in tasks:
                 if not t.done():
                     t.cancel()
-            # Close anything still prefetched so interrupted turns don't leak requests.
             while not queue.empty():
                 item = queue.get_nowait()
                 if item is not None:
@@ -408,4 +392,14 @@ def build_sarvam_tts() -> SarvamTTS | None:
     if not key:
         return None
     speaker = (os.getenv("SARVAM_TTS_SPEAKER") or "priya").strip() or "priya"
-    return SarvamTTS(api_key=key, speaker=speaker)
+    return SarvamTTS(api_key=key, speaker=speaker, language="en")
+
+
+def build_language_router() -> LanguageRoutedTTS:
+    """Sarvam-only router. Raises if the API key is missing — no Kokoro fallback."""
+    sarvam = build_sarvam_tts()
+    if sarvam is None:
+        raise RuntimeError(
+            "SARVAM_API_KEY is required — English and Indic TTS both run on Bulbul v3"
+        )
+    return LanguageRoutedTTS(sarvam=sarvam)

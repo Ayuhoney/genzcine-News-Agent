@@ -57,23 +57,31 @@ async def _wait_sources(*coros: Any, timeout: float) -> list[Any]:
 _NEWSDATA_LANG: dict[str, str] = {
     "en-US": "en",
     "en-GB": "en",
-    "es": "es",
-    "fr": "fr",
-    "it": "it",
-    "pt-BR": "pt",
-    "zh": "zh",
     "hi": "hi",
+    "pa": "pa",  # NewsData may fall back; RSS still used
+    "bn": "bn",
+    "ta": "ta",
+    "te": "te",
+    "kn": "en",
+    "ml": "en",
+    "mr": "mr",
+    "gu": "gu",
+    "od": "en",
 }
 
 _RSS_LOCALE: dict[str, tuple[str, str, str]] = {
     "en-US": ("en-IN", "IN", "IN:en"),
     "en-GB": ("en-GB", "GB", "GB:en"),
-    "es": ("es", "ES", "ES:es"),
-    "fr": ("fr", "FR", "FR:fr"),
-    "it": ("it", "IT", "IT:it"),
-    "pt-BR": ("pt-BR", "BR", "BR:pt-419"),
-    "zh": ("zh-CN", "CN", "CN:zh-Hans"),
     "hi": ("hi", "IN", "IN:hi"),
+    "pa": ("pa", "IN", "IN:pa"),
+    "bn": ("bn", "IN", "IN:bn"),
+    "ta": ("ta", "IN", "IN:ta"),
+    "te": ("te", "IN", "IN:te"),
+    "kn": ("kn", "IN", "IN:kn"),
+    "ml": ("ml", "IN", "IN:ml"),
+    "mr": ("mr", "IN", "IN:mr"),
+    "gu": ("gu", "IN", "IN:gu"),
+    "od": ("or", "IN", "IN:or"),
 }
 
 _COMMUNITY_SOURCES = ("user", "citizen")

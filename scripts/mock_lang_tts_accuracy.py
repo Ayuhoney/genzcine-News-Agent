@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from local_voice_ai.agent import _correct_place_transcript, _headline_spoken_line
-from local_voice_ai.services.sarvam_tts import LanguageRoutedTTS, build_sarvam_tts
+from local_voice_ai.services.sarvam_tts import build_language_router, build_sarvam_tts
 from local_voice_ai.services.spoken_lang import detect_spoken_lang
 
 HI_NEWS = "\u092b\u093f\u0930\u094b\u091c\u092a\u0941\u0930 \u0915\u0940 \u0916\u092c\u0930 \u0926\u094b"
@@ -169,58 +169,60 @@ def test_headline_scripts() -> None:
 
 
 def test_router() -> None:
-    class _Dummy:
-        sample_rate = 24000
-        num_channels = 1
+    from local_voice_ai.services.sarvam_tts import build_language_router
 
-        def synthesize(self, text: str, *, conn_options: Any = None):
-            return ("en", text)
-
-        def stream(self, *, conn_options: Any = None):
-            return "en-stream"
-
-    indic = build_sarvam_tts()
-    router = LanguageRoutedTTS(english=_Dummy(), indic=indic)  # type: ignore[arg-type]
-    _ok("router default kokoro", router.engine == "kokoro" and router.spoken == "en")
-    _ok("sarvam key loaded", indic is not None)
-    if indic is None:
-        return
-    _ok("set hi", router.set_spoken("hi") and router.engine == "sarvam-http:hi")
+    router = build_language_router()
+    _ok("router default sarvam:en", router.engine == "sarvam:en" and router.spoken == "en")
+    _ok("set hi", router.set_spoken("hi") and router.engine == "sarvam:hi")
     _ok(
         "set pa",
-        router.set_spoken("pa") and router.engine == "sarvam-http:pa" and indic._language == "pa",
+        router.set_spoken("pa") and router.engine == "sarvam:pa" and router._sarvam._language == "pa",
     )
-    _ok("set en back", router.set_spoken("en") is True and router.engine == "kokoro")
+    _ok("set en back", router.set_spoken("en") is True and router.engine == "sarvam:en")
     router.set_spoken("hi")
-    engine = router._active("To recap quickly: rain in Delhi.")
-    _ok("latin-only while hi stays sarvam", engine is router._indic)
-    engine = router._active("\u0928\u092e\u0938\u094d\u0924\u0947 \u0926\u093f\u0932\u094d\u0932\u0940")
-    _ok("devanagari while en uses sarvam", engine is router._indic)
+    _ok("latin-only while hi stays hi", router._lang_for("To recap quickly: rain in Delhi.") == "hi")
+    _ok(
+        "devanagari while en uses hi",
+        router._lang_for("\u0928\u092e\u0938\u094d\u0924\u0947 \u0926\u093f\u0932\u094d\u0932\u0940") == "hi",
+    )
     router.set_spoken("en")
-    engine = router._active("\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32")
-    _ok("gurmukhi while en uses sarvam pa", engine is router._indic and indic._language == "pa")
-    engine = router._active("You're watching GenzCine.")
-    _ok("latin english stays kokoro", engine is router._english)
+    _ok(
+        "gurmukhi while en uses pa",
+        router._lang_for("\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32") == "pa",
+    )
+    _ok("latin english stays en", router._lang_for("You're watching GenzCine.") == "en")
+    _ok("set ta", router.set_spoken("ta") and router.engine == "sarvam:ta")
 
 
-async def test_kokoro() -> None:
+async def test_sarvam_english() -> None:
+    key = (os.getenv("SARVAM_API_KEY") or "").strip()
+    if not key:
+        _ok("sarvam english tts", False, "no key")
+        return
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            h = await client.get("http://127.0.0.1:8880/health")
-            _ok("kokoro health", h.status_code == 200)
+        async with httpx.AsyncClient(timeout=30) as client:
             t0 = time.perf_counter()
             r = await client.post(
-                "http://127.0.0.1:8880/v1/audio/speech",
-                json={"input": "This is TINA with today's headlines.", "voice": "af_nova"},
+                "https://api.sarvam.ai/text-to-speech/stream",
+                headers={"api-subscription-key": key},
+                json={
+                    "text": "This is TINA with today's headlines.",
+                    "language_code": "en-IN",
+                    "target_language_code": "en-IN",
+                    "model": "bulbul:v3",
+                    "speaker": os.getenv("SARVAM_TTS_SPEAKER") or "priya",
+                    "output_audio_codec": "linear16",
+                    "speech_sample_rate": 24000,
+                },
             )
             ms = round((time.perf_counter() - t0) * 1000)
             _ok(
-                "kokoro tts",
+                "sarvam english tts",
                 r.status_code == 200 and len(r.content) > 2000,
                 f"bytes={len(r.content)} ms={ms}",
             )
     except Exception as exc:
-        _ok("kokoro tts", False, str(exc))
+        _ok("sarvam english tts", False, str(exc))
 
 
 async def _sarvam_http(key: str, text: str, lang: str) -> dict[str, Any]:
@@ -395,7 +397,7 @@ async def main() -> int:
     test_place_correction_vs_lang()
     test_headline_scripts()
     test_router()
-    await test_kokoro()
+    await test_sarvam_english()
     key = (os.getenv("SARVAM_API_KEY") or "").strip()
     _ok("sarvam key present", bool(key and key.startswith("sk_")))
     audio: dict[str, bytes] = {}

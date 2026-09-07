@@ -24,7 +24,6 @@ from livekit.agents import (
     llm as lk_llm,
     room_io,
 )
-from livekit.agents.tts import StreamAdapter
 from livekit.agents.voice.agent_activity import update_instructions as _ctx_update_instructions
 from livekit.plugins import openai, silero, simli
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
@@ -32,8 +31,11 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from .services.agent_errors import classify_agent_error
 from .services.india_places import all_place_names, canonical_place, extract_place, news_query_for
 from .services.news import fetch_latest_news
-from .services.sarvam_tts import LanguageRoutedTTS, build_sarvam_tts
+from .services.sarvam_tts import LanguageRoutedTTS, build_language_router
 from .services.spoken_lang import (
+    SARVAM_LANGS,
+    SESSION_TO_SPOKEN,
+    SPOKEN_TO_SESSION,
     detect_spoken_lang,
     is_language_switch_only,
     is_stt_garbage,
@@ -59,7 +61,8 @@ STT_API_KEY  = os.getenv("STT_API_KEY",  "")
 # Whisper maps Indian city names to English lookalikes ("Firozpur" → "Frostburt").
 # Keep this free of switch phrases — Whisper will otherwise transcribe the prompt.
 _STT_PROMPT = (
-    "Indian news conversation in English, Hindi, or Punjabi. "
+    "Indian news conversation in English, Hindi, Punjabi, Bengali, Tamil, Telugu, "
+    "Kannada, Malayalam, Marathi, Gujarati, or Odia. "
     "Place names: Delhi, Mumbai, Kolkata, Chennai, Bengaluru, Hyderabad, Pune, "
     "Ahmedabad, Jaipur, Lucknow, Patna, Bhopal, Chandigarh, Punjab, Kerala, "
     "Tamil Nadu, Firozpur, Mohali."
@@ -149,10 +152,8 @@ def _correct_place_transcript(text: str, *, collapse: bool = True) -> str:
             return ranked[0][1]
     return raw
 
-# TTS (Kokoro local)
-TTS_BASE_URL = os.getenv("TTS_BASE_URL", "http://127.0.0.1:8880/v1")
-TTS_VOICE    = os.getenv("TTS_VOICE",    "af_nova")
-TTS_API_KEY  = os.getenv("TTS_API_KEY",  "no-key-needed")
+# Sarvam Bulbul is the only TTS. Speaker comes from SARVAM_TTS_SPEAKER.
+TTS_VOICE = os.getenv("TTS_VOICE", os.getenv("SARVAM_TTS_SPEAKER", "priya"))
 
 # Simli
 SIMLI_API_KEY      = os.getenv("SIMLI_API_KEY",      "")
@@ -196,38 +197,10 @@ def _llm_client_options() -> dict:
     return opts
 
 
-def _build_tts(voice: str) -> tuple[LanguageRoutedTTS, LanguageRoutedTTS]:
-    """Kokoro via StreamAdapter (sentence PCM). Sarvam via WebSocket when Hindi/Punjabi."""
-    from openai import AsyncClient
-
-    client = AsyncClient(
-        api_key=TTS_API_KEY or "no-key-needed",
-        base_url=TTS_BASE_URL,
-        max_retries=0,
-        http_client=httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
-            follow_redirects=True,
-            limits=httpx.Limits(
-                max_connections=20,
-                max_keepalive_connections=10,
-                keepalive_expiry=120,
-            ),
-        ),
-    )
-    raw_tts = openai.TTS(
-        base_url=TTS_BASE_URL,
-        model="tts-1",
-        voice=voice,
-        api_key=TTS_API_KEY,
-        response_format="pcm",
-        client=client,
-    )
-    kokoro = StreamAdapter(tts=raw_tts)
-    router = LanguageRoutedTTS(english=kokoro, indic=build_sarvam_tts())
-    logger.info(
-        "TTS router ready: default=kokoro streaming=1 sarvam_http=%s",
-        router._indic is not None,
-    )
+def _build_tts(_voice: str = "") -> tuple[LanguageRoutedTTS, LanguageRoutedTTS]:
+    """Sarvam Bulbul v3 only — English + all Indic languages, one Priya voice."""
+    router = build_language_router()
+    logger.info("TTS router ready: engine=sarvam-bulbul langs=%s", ",".join(SARVAM_LANGS))
     return router, router
 
 
@@ -309,24 +282,30 @@ _BASE_INSTRUCTIONS = """
 You are {anchor_name}, GenzCine news anchor (Mohali, genzcine.com). Voice only — 1-2 short sentences.
 Opening already played; do not greet again or ask their city.
 Call get_latest_news before any current news; never invent. play_news_video only if they ask for a clip.
-Hindi/Punjabi/English/Hinglish: understand them. City names in any script are places, not language locks.
+Understand English and Indian languages (Hindi, Punjabi, Bengali, Tamil, Telugu, Kannada, Malayalam, Marathi, Gujarati, Odia) including Hinglish.
+City names in any script are places, not language locks. Reply in the active session language's native script.
 No <think>, lists, or plan-narration.
 """
 
-# Session languages — Kokoro TTS lang codes: a/b (English), e, f, h, i, j, p, z.
+# Session languages = Sarvam Bulbul + Sarvam-105B intersection (Whisper STT covers all).
 # code -> (display name, extra instruction for the LLM)
+_SCRIPT_REPLY = (
+    "Write EVERY reply in {script}. Do not open with Hey, Hello, or English sentences. "
+    "Names like TINA and GenzCine may stay in English."
+)
 _LANGUAGES: dict[str, tuple[str, str]] = {
-    "en-US": ("English", ""),
-    "en-GB": ("English", "Use British English spelling and phrasing."),
-    "hi": ("Hindi", "Write EVERY reply in Devanagari script. Do not open with Hey, Hello, or English "
-           "sentences. Names like TINA and GenzCine may stay in English."),
-    "pa": ("Punjabi", "Write EVERY reply in Gurmukhi script. Do not open with Hey, Hello, or English "
-           "sentences. Names like TINA and GenzCine may stay in English."),
-    "es": ("Spanish", ""),
-    "fr": ("French", ""),
-    "it": ("Italian", ""),
-    "pt-BR": ("Brazilian Portuguese", ""),
-    "zh": ("Mandarin Chinese", "Write in Simplified Chinese."),
+    "en-US": ("English", "Use clear Indian English. Keep replies short."),
+    "en-GB": ("English", "Use clear Indian English. Keep replies short."),
+    "hi": ("Hindi", _SCRIPT_REPLY.format(script="Devanagari script")),
+    "pa": ("Punjabi", _SCRIPT_REPLY.format(script="Gurmukhi script")),
+    "bn": ("Bengali", _SCRIPT_REPLY.format(script="Bengali script")),
+    "ta": ("Tamil", _SCRIPT_REPLY.format(script="Tamil script")),
+    "te": ("Telugu", _SCRIPT_REPLY.format(script="Telugu script")),
+    "kn": ("Kannada", _SCRIPT_REPLY.format(script="Kannada script")),
+    "ml": ("Malayalam", _SCRIPT_REPLY.format(script="Malayalam script")),
+    "mr": ("Marathi", _SCRIPT_REPLY.format(script="Devanagari script (Marathi)")),
+    "gu": ("Gujarati", _SCRIPT_REPLY.format(script="Gujarati script")),
+    "od": ("Odia", _SCRIPT_REPLY.format(script="Odia script")),
 }
 
 
@@ -365,7 +344,7 @@ def _trim_description(text: str, *, limit: int = 100) -> str:
 
 
 def _tv_open_segments(anchor_name: str, viewer_name: str | None) -> list[tuple[str, str]]:
-    """Trilingual ident: Hindi + Punjabi on Sarvam, English on Kokoro.
+    """Trilingual ident: Hindi + Punjabi + English — all Sarvam Priya.
 
     The Hindi/Punjabi lines are fixed text (no viewer name) so the Sarvam PCM
     cache serves them instantly and for free; the name goes in the English line.
@@ -376,7 +355,7 @@ def _tv_open_segments(anchor_name: str, viewer_name: str | None) -> list[tuple[s
     welcome = f"Welcome, {viewer_name}." if viewer_name else "Welcome."
     en = (
         f"{welcome} You're watching GenzCine — I'm {anchor_name}. "
-        "Speak Hindi, Punjabi or English. Here's today's bulletin."
+        "Speak any Indian language or English. Here's today's bulletin."
     )
     return [("hi", hi), ("pa", pa), ("en", en)]
 
@@ -576,9 +555,6 @@ class Assistant(Agent):
             + (_GROUP_ADDON if self._session_type == "group" else "")
         )
 
-    def _spoken_code(self) -> str:
-        return {"hi": "hi", "pa": "pa"}.get(self._language, "en")
-
     async def on_user_turn_completed(
         self, turn_ctx: lk_llm.ChatContext, new_message: lk_llm.ChatMessage
     ) -> None:
@@ -707,21 +683,18 @@ class Assistant(Agent):
             raise
 
     async def _say_language(self, code: str, text: str, *, wait: bool = True) -> None:
-        """Speak one line on the correct engine. Hindi/Punjabi never go to Kokoro."""
+        """Speak one line on Sarvam in the given language (same Priya voice)."""
         line = (text or "").strip()
         if not line or not self._can_speak():
             return
         router = self._tts_router
         if router is not None:
-            if code in {"hi", "pa"} and router._indic is None:
-                logger.warning("skip %s line — Sarvam missing, not falling back to Kokoro", code)
-                return
-            router.set_spoken(code)
+            router.set_spoken(code if code in SARVAM_LANGS else "en")
             logger.info("say lang=%s tts=%s chars=%d", code, router.engine, len(line))
         await self._safe_say(line, wait=wait)
 
     async def _speak_trilingual_open(self, viewer_name: str | None) -> None:
-        """Namaste (Sarvam hi) → Sat Sri Akal (Sarvam pa) → English ident (Kokoro)."""
+        """Namaste (hi) → Sat Sri Akal (pa) → English ident — all Sarvam Priya."""
         for code, line in _tv_open_segments(self._anchor_name, viewer_name):
             if not self._can_speak():
                 return
@@ -730,20 +703,24 @@ class Assistant(Agent):
             self._tts_router.set_spoken("en")
 
     def _spoken_mapped(self, code: str) -> str | None:
-        mapped = {"en": "en-US", "hi": "hi", "pa": "pa"}.get(code)
+        mapped = SPOKEN_TO_SESSION.get(code)
         if mapped and mapped in _LANGUAGES:
             return mapped
         return None
+
+    def _spoken_code(self) -> str:
+        return SESSION_TO_SPOKEN.get(self._language, "en")
 
     async def _commit_language_instructions(self) -> None:
         """Push the session-language addon to the LLM. Call after TTS is already switched."""
         await self.update_instructions(self._instructions_text())
 
     async def apply_spoken_language(self, code: str, *, update_llm: bool = True) -> bool:
-        """Switch Kokoro/Sarvam TTS and (optionally) the LLM language addon.
+        """Switch Sarvam TTS language + (optionally) the LLM language addon.
 
-        Only call from on_user_turn_completed for live switches — there LiveKit
-        applies it to the reply being generated instead of racing it.
+        Same Priya voice across every language — only the language_code changes,
+        so transitions stay voice-matched. Call from on_user_turn_completed so
+        LiveKit applies it to the reply being generated instead of racing it.
         """
         mapped = self._spoken_mapped(code)
         if not mapped:
@@ -752,9 +729,6 @@ class Assistant(Agent):
             return False
         router = self._tts_router
         if router is not None:
-            if code in {"hi", "pa"} and router._indic is None:
-                logger.info("heard %s but Sarvam key missing — keep Kokoro English", code)
-                return False
             router.set_spoken(code)
         self._language = mapped
         if update_llm:
@@ -956,8 +930,8 @@ async def my_agent(ctx: JobContext) -> None:
     session_type = "group" if ctx.room.name.startswith("group_room_") else "individual"
 
     logger.info(
-        "agent session: type=%s stt=%s llm=%s tts=%s",
-        session_type, STT_MODEL, LLM_MODEL, TTS_BASE_URL,
+        "agent session: type=%s stt=%s llm=%s tts=sarvam-bulbul",
+        session_type, STT_MODEL, LLM_MODEL,
     )
 
     await ctx.connect()
@@ -1396,7 +1370,7 @@ async def my_agent(ctx: JobContext) -> None:
             "language": language,
             "sessionType": session_type,
             "title": "You're watching GenzCine with " + anchor_name,
-            "message": "Hindi, Punjabi, English — speak any language. Today's bulletin is starting.",
+            "message": "Speak Hindi, Punjabi, Bengali, Tamil, Telugu, Kannada, Malayalam, Marathi, Gujarati, Odia or English. Today's bulletin is starting.",
         },
     )
 

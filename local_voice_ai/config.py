@@ -81,12 +81,12 @@ class Config:
     voxbox_hf_repo_id: str = "Systran/faster-whisper-small"
     voxbox_device: str = "cpu"
 
-    # --- TTS (Kokoro) ---------------------------------------------------
+    # --- TTS (disabled locally — Sarvam Bulbul is the sole TTS) ---------------
     tts_base_url: str = "http://127.0.0.1:8880/v1"
-    tts_voice: str = "af_nova"
+    tts_voice: str = "priya"
     tts_api_key: str = "no-key-needed"
     tts_bind_port: int = 8880
-    manage_tts: bool = True
+    manage_tts: bool = False
 
     # --- News -------------------------------------------------------------
     newsdata_api_key: str = ""
@@ -97,7 +97,7 @@ class Config:
     simli_face_id: str = "cace3ef7-a4c4-425d-a8cf-a5358eb0c427"
     simli_livekit_url: str = ""  # public URL Simli uses to reach LiveKit (ngrok/tunnel)
 
-    # --- Sarvam (Hindi / Punjabi TTS only; English stays on Kokoro) -----
+    # --- Sarvam (sole TTS for English + all Indic languages) ------------
     sarvam_api_key: str = ""
     sarvam_tts_speaker: str = "priya"
 
@@ -170,7 +170,7 @@ class Config:
             tts_voice=os.getenv("TTS_VOICE", cls.tts_voice),
             tts_api_key=os.getenv("TTS_API_KEY", cls.tts_api_key),
             tts_bind_port=int(os.getenv("TTS_BIND_PORT", str(cls.tts_bind_port))),
-            manage_tts=_env_bool("MANAGE_TTS", _is_loopback(tts_base_url)),
+            manage_tts=_env_bool("MANAGE_TTS", False),
             #
             newsdata_api_key=os.getenv("NEWSDATA_API_KEY", cls.newsdata_api_key),
             youtube_api_key=os.getenv("YOUTUBE_API_KEY", cls.youtube_api_key),
