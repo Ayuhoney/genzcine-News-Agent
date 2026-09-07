@@ -114,6 +114,45 @@ async def test_fetch_latest_news_city_fast_path_uses_rss(monkeypatch):
     assert "Firozpur" in articles[0]["title"]
 
 
+@pytest.mark.asyncio
+async def test_city_ask_keeps_query_scoped_rss_when_mention_misses(monkeypatch):
+    """Small-city Google hits often omit the city name — still speak them."""
+    _HEADLINE_CACHE.clear()
+
+    async def fake_published(*_args, **_kwargs):
+        return []
+
+    async def fake_rss(query, _language, limit):
+        # Only the bare city query returns regional headlines without "Firozpur".
+        if query == "Firozpur":
+            return [
+                {
+                    "title": "Punjab police intensify border checks",
+                    "description": "Statewide drive.",
+                    "link": "https://example.com/pb",
+                    "source": "Hindustan Times",
+                    "pubDate": "2026-09-07T10:00:00Z",
+                    "provider": "google_rss",
+                }
+            ][:limit]
+        return []
+
+    monkeypatch.setattr("local_voice_ai.services.news._fetch_published_news", fake_published)
+    monkeypatch.setattr("local_voice_ai.services.news._fetch_google_rss", fake_rss)
+    monkeypatch.setattr(
+        "local_voice_ai.services.news._fetch_official_paper_rss",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no official")),
+    )
+    monkeypatch.setattr(
+        "local_voice_ai.services.news._fetch_global_newsdata",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no global")),
+    )
+
+    articles = await fetch_latest_news(query="Firozpur", language="hi", limit=1)
+    assert len(articles) == 1
+    assert "Punjab" in articles[0]["title"]
+
+
 def test_preferred_indian_papers_detected_and_boosted():
     query = _preferred_paper_query("Firozpur")
     assert "Dainik Bhaskar" in query

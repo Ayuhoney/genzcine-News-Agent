@@ -176,16 +176,33 @@ _STT_GARBAGE = re.compile(
     re.IGNORECASE,
 )
 
-_NEWS_ASK = re.compile(
-    r"news|headline|khabar|khabr|\u0916\u092c\u0930|\u0a16\u0a2c\u0a30|batao|bataiye|tell\s+(?:me|us)|"
-    r"suna[o]|dikha[o]|\u0926\u093f\u0916\u093e|\u0938\u0941\u0928\u093e|\u0a26\u0a71\u0a38",
+_NEWS_NOUN = re.compile(
+    r"news|headline|khabar|khabr|\u0916\u092c\u0930|\u0a16\u0a2c\u0a30|"
+    r"bulletin|headlines|\u0938\u092e\u093e\u091a\u093e\u0930",
+    re.IGNORECASE,
+)
+_NEWS_VERB = re.compile(
+    r"batao|bataiye|tell\s+(?:me|us)|suna[o]|dikha[o]|"
+    r"\u0926\u093f\u0916\u093e|\u0938\u0941\u0928\u093e|\u0a26\u0a71\u0a38",
     re.IGNORECASE,
 )
 
 
 def is_news_ask(text: str) -> bool:
-    """True when the viewer is asking for headlines / to be told something."""
-    return bool(_NEWS_ASK.search(text or ""))
+    """True when the viewer wants headlines — not generic 'batao/tell me' chit-chat."""
+    raw = text or ""
+    if _NEWS_NOUN.search(raw):
+        return True
+    # Verb alone is not enough unless a known place is in the line.
+    if _NEWS_VERB.search(raw):
+        try:
+            from .india_places import extract_place
+
+            if extract_place(raw):
+                return True
+        except Exception:
+            pass
+    return False
 
 
 # Instant confirm while the LLM language addon catches up — same Priya voice.

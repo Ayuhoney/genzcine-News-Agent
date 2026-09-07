@@ -37,6 +37,7 @@ from .services.spoken_lang import (
     SESSION_TO_SPOKEN,
     SPOKEN_TO_SESSION,
     detect_spoken_lang,
+    has_sarvam_script,
     is_language_switch_only,
     is_news_ask,
     is_stt_garbage,
@@ -443,6 +444,35 @@ def _tv_open(anchor_name: str, viewer_name: str | None, language: str) -> str:
     )
 
 
+def _headline_spoken_parts(
+    article: dict,
+    *,
+    is_first: bool = False,
+    index: int = 0,
+    language: str = "en-US",
+) -> tuple[str, str]:
+    """Native bridge + Latin body so Indic TTS does not mangling English titles."""
+    title = str(article.get("title", "")).strip()
+    desc = _trim_description(str(article.get("description", "")))
+    if article.get("provider") == "community":
+        title = f"From a GenzCine reporter: {title}"
+    elif article.get("provider") == "genzcine":
+        title = f"From GenzCine local: {title}"
+    body = f"{title}. {desc}".strip() if desc else f"{title}."
+    if language == "hi":
+        bridge = "पहली बड़ी खबर।" if is_first else _HEADLINE_BRIDGES_HI[index % len(_HEADLINE_BRIDGES_HI)]
+        return bridge.strip(), body
+    if language == "pa":
+        bridge = "ਪਹਿਲੀ ਵੱਡੀ ਖ਼ਬਰ।" if is_first else _HEADLINE_BRIDGES_PA[index % len(_HEADLINE_BRIDGES_PA)]
+        return bridge.strip(), body
+    if language in _LANGUAGES and language not in ("en-US", "en-GB", "en"):
+        # Other Indic sessions: short English bridge keeps Priya natural on Latin wire copy.
+        bridge = "Top story." if is_first else _HEADLINE_BRIDGES[index % len(_HEADLINE_BRIDGES)]
+        return bridge.strip(), body
+    bridge = "Our top story." if is_first else _HEADLINE_BRIDGES[index % len(_HEADLINE_BRIDGES)]
+    return bridge.strip(), body
+
+
 def _headline_spoken_line(
     anchor_name: str,
     article: dict,
@@ -452,25 +482,10 @@ def _headline_spoken_line(
     viewer_name: str | None = None,
     language: str = "en-US",
 ) -> str:
-    title = str(article.get("title", "")).strip()
-    desc = _trim_description(str(article.get("description", "")))
-    if article.get("provider") == "community":
-        title = f"From a GenzCine reporter: {title}"
-    elif article.get("provider") == "genzcine":
-        title = f"From GenzCine local: {title}"
-    body = f" {title}. {desc}" if desc else f" {title}."
-    if language == "hi":
-        if is_first:
-            return f"पहली बड़ी खबर।{body}".strip()
-        return f"{_HEADLINE_BRIDGES_HI[index % len(_HEADLINE_BRIDGES_HI)]}{body}".strip()
-    if language == "pa":
-        if is_first:
-            return f"ਪਹਿਲੀ ਵੱਡੀ ਖ਼ਬਰ।{body}".strip()
-        return f"{_HEADLINE_BRIDGES_PA[index % len(_HEADLINE_BRIDGES_PA)]}{body}".strip()
-    if is_first:
-        return f"Our top story.{body}".strip()
-    bridge = _HEADLINE_BRIDGES[index % len(_HEADLINE_BRIDGES)]
-    return f"{bridge}{body}".strip()
+    bridge, body = _headline_spoken_parts(
+        article, is_first=is_first, index=index, language=language
+    )
+    return f"{bridge} {body}".strip()
 
 
 async def _refresh_headlines(agent: "Assistant", *, topic: str = "") -> bool:
@@ -622,6 +637,9 @@ class Assistant(Agent):
         if is_stt_garbage(raw):
             logger.info("turn skipped (stt garbage): %r", raw[:100])
             raise StopResponse()
+        if _llm_cooling():
+            logger.info("turn skipped — LLM cooldown active")
+            raise StopResponse()
 
         text = _correct_place_transcript(raw, collapse=False)
         if text and text != raw:
@@ -728,16 +746,23 @@ class Assistant(Agent):
 
         idx = self._headline_index % len(self._last_headlines)
         article = self._last_headlines[idx]
-        text = _headline_spoken_line(
-            self._anchor_name,
+        bridge, body = _headline_spoken_parts(
             article,
             is_first=is_first,
             index=idx,
-            viewer_name=viewer_name,
             language=self._language,
         )
         await self._publish_headline_now()
-        await self._safe_say(text)
+        spoken = self._spoken_code()
+        # Native opener, then en-IN for Latin wire copy — avoids cartoon Hindi-on-English TTS.
+        if bridge and spoken != "en" and not has_sarvam_script(body, spoken):
+            await self._say_language(spoken, bridge)
+            if body:
+                await self._say_language("en", body)
+        else:
+            await self._safe_say(f"{bridge} {body}".strip())
+        if self._tts_router is not None:
+            self._tts_router.set_spoken(spoken)
         return True
 
     def _can_speak(self) -> bool:
@@ -820,12 +845,21 @@ class Assistant(Agent):
     @function_tool
     async def get_latest_news(self, context: RunContext, topic: str = "") -> str:
         """Fetch live headlines. Call before reporting news. topic: city or subject, or empty."""
+        query: str | None = self._preferred_location or None
         if topic:
-            self._preferred_location = (
-                news_query_for(_correct_place_transcript(topic.strip())) or ""
-            )
+            cleaned = _correct_place_transcript(topic.strip())
+            place = extract_place(cleaned) or canonical_place(cleaned)
+            if place and place != "national":
+                sticky = news_query_for(place) or place
+                self._preferred_location = sticky
+                query = sticky
+            elif place == "national":
+                query = None
+            else:
+                # Topical ask (cricket etc.) — one-shot query, do not wipe city sticky.
+                query = cleaned or self._preferred_location or None
         articles = await fetch_latest_news(
-            query=self._preferred_location or None, language=self._language, limit=NEWS_HEADLINE_LIMIT
+            query=query, language=self._language, limit=NEWS_HEADLINE_LIMIT
         )
         if not articles:
             await self._publish_studio(
@@ -1065,8 +1099,8 @@ async def my_agent(ctx: JobContext) -> None:
         turn_handling={
             "interruption": {
                 "enabled": True,
-                "min_duration": 0.25,
-                "min_words": 0,
+                "min_duration": 0.45,
+                "min_words": 1,
                 # Simli avatar cannot pause mid-utterance; rely on session.interrupt().
                 "resume_false_interruption": not _use_simli,
                 "false_interruption_timeout": 1.0,
@@ -1382,14 +1416,23 @@ async def my_agent(ctx: JobContext) -> None:
                 _bc["paused"] = True
                 _cancel_conversation_idle()
                 place = extract_place(text)
+                if place:
+                    sticky = news_query_for(place) or place
+                    if sticky:
+                        agent._preferred_location = sticky
                 asyncio.create_task(
                     _warm_headline_cache(
                         agent,
-                        place if place and not agent._preferred_location else None,
+                        agent._preferred_location or place or None,
                     )
                 )
                 if not _bc["conversation_mode"]:
                     asyncio.create_task(_enter_conversation_mode())
+                try:
+                    # Real final transcript — hard-interrupt bulletin for the reply.
+                    session.interrupt(force=True)
+                except Exception:
+                    logger.exception("session.interrupt failed on final STT")
             asyncio.create_task(
                 _publish_transcript(
                     role="user",
@@ -1591,8 +1634,7 @@ async def my_agent(ctx: JobContext) -> None:
     def _on_agent_state_changed(ev) -> None:
         try:
             if ev.new_state == "thinking" and _bc["paused"] and _bc["user_turn_active"]:
-                # Filler may end straight into thinking without a listening gap.
-                agent._filler_speaking = False
+                # Do NOT clear _filler_speaking here — filler audio may still be playing.
                 _schedule_thinking_filler()
             elif ev.new_state == "speaking":
                 _cancel_thinking_filler()
@@ -1607,10 +1649,12 @@ async def my_agent(ctx: JobContext) -> None:
                 _cancel_reply_nudge()
                 _cancel_conversation_idle()
                 if _bc["user_turn_active"]:
-                    _bc["agent_responding_to_user"] = True
-                    if ev.new_state == "speaking":
+                    # Filler speech must not look like the finished viewer reply.
+                    if not (ev.new_state == "speaking" and agent._filler_speaking):
+                        _bc["agent_responding_to_user"] = True
+                    if ev.new_state == "speaking" and not agent._filler_speaking:
                         logger.info("agent responding to viewer")
-                    else:
+                    elif ev.new_state == "thinking":
                         logger.info("agent thinking — holding bulletin and nudge")
             elif ev.old_state == "speaking" and ev.new_state in ("listening", "idle"):
                 if agent._filler_speaking:
@@ -1644,13 +1688,13 @@ async def my_agent(ctx: JobContext) -> None:
                 _cancel_reply_nudge()
                 _cancel_conversation_idle()
                 _cancel_thinking_filler()
-                if not _bc["conversation_mode"]:
-                    asyncio.create_task(_enter_conversation_mode())
+                # Soft pause only — wait for final STT before hard interrupt / conversation.
+                # Coughs & noise otherwise kill the bulletin for CONVERSATION_IDLE_SECONDS.
                 task = _bc.get("continue_task")
                 if task and not task.done():
                     task.cancel()
                 try:
-                    session.interrupt(force=True)
+                    session.interrupt(force=False)
                 except Exception:
                     logger.exception("session.interrupt failed while user speaking")
             elif ev.new_state == "listening" and _bc["paused"] and _bc["user_turn_active"]:

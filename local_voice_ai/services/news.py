@@ -23,6 +23,7 @@ GENZCINE_NEWS_API = os.getenv("GENZCINE_NEWS_API", "https://api.genzcine.com/v1/
 _CACHE_TTL_SEC = 20 * 60
 _HEADLINE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _FETCH_DEADLINE_SEC = float(os.getenv("NEWS_FETCH_DEADLINE_SEC", "2.2"))
+_INFLIGHT: dict[str, asyncio.Future] = {}
 _HTTP: httpx.AsyncClient | None = None
 
 
@@ -52,6 +53,44 @@ async def _wait_sources(*coros: Any, timeout: float) -> list[Any]:
                 results.append([])
         else:
             results.append([])
+    return results
+
+
+async def _wait_sources_early(
+    *coros: Any,
+    timeout: float,
+    enough: int,
+) -> list[Any]:
+    """Like _wait_sources, but cancel stragglers once we already have `enough` items."""
+    tasks = [asyncio.create_task(coro) for coro in coros]
+    results: list[Any] = [[] for _ in tasks]
+    pending: set[asyncio.Task] = set(tasks)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.1, timeout)
+    while pending:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        done, pending = await asyncio.wait(
+            pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+        )
+        if not done:
+            break
+        for task in done:
+            idx = tasks.index(task)
+            try:
+                results[idx] = task.result() if not task.cancelled() else []
+            except Exception as exc:
+                logger.warning("news source failed: %s", exc)
+                results[idx] = []
+        got = sum(len(r) for r in results if isinstance(r, list))
+        if got >= enough:
+            for task in pending:
+                task.cancel()
+            pending.clear()
+            break
+    for task in pending:
+        task.cancel()
     return results
 
 _NEWSDATA_LANG: dict[str, str] = {
@@ -659,18 +698,49 @@ async def fetch_latest_news(
     if cached:
         return cached[:limit]
 
+    existing = _INFLIGHT.get(cache_key)
+    if existing is not None and not existing.done():
+        try:
+            articles = await existing
+            return articles[:limit]
+        except Exception:
+            pass
+
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    _INFLIGHT[cache_key] = fut
+    try:
+        articles = await _fetch_latest_news_uncached(query, language, limit, cache_key)
+        if not fut.done():
+            fut.set_result(articles)
+        return articles[:limit]
+    except Exception as exc:
+        if not fut.done():
+            fut.set_exception(exc)
+        raise
+    finally:
+        if _INFLIGHT.get(cache_key) is fut:
+            _INFLIGHT.pop(cache_key, None)
+
+
+async def _fetch_latest_news_uncached(
+    query: Optional[str],
+    language: str,
+    limit: int,
+    cache_key: str,
+) -> list[dict[str, Any]]:
     stale = _get_stale_articles(cache_key)
     city = (query or "").strip()
     paper_q = _preferred_paper_query(query)
 
     if city:
-        # Fast path: skip national paper RSS + NewsData — city filter empties them
-        # most of the time anyway, and they burn the shared deadline.
-        published, rss, rss_papers = await _wait_sources(
+        # Fast path + early exit once we have enough RSS/published hits.
+        published, rss, rss_papers = await _wait_sources_early(
             _fetch_published_news(query, limit),
             _fetch_google_rss(query, language, limit),
             _fetch_google_rss(paper_q, language, limit),
             timeout=_FETCH_DEADLINE_SEC,
+            enough=max(limit, 3),
         )
         official: list[dict[str, Any]] = []
         global_wire: list[dict[str, Any]] = []
@@ -684,10 +754,21 @@ async def fetch_latest_news(
             timeout=_FETCH_DEADLINE_SEC,
         )
 
-    rss = _merge_articles(rss, rss_papers, limit=max(limit * 3, 12))
-    rss = [a for a in rss if not _is_junk_title(str(a.get("title") or ""))]
+    rss_scoped = _merge_articles(rss, rss_papers, limit=max(limit * 3, 12))
+    rss_scoped = [a for a in rss_scoped if not _is_junk_title(str(a.get("title") or ""))]
     if city:
-        rss = [a for a in rss if _mentions_query(a, city)]
+        rss_hit = [a for a in rss_scoped if _mentions_query(a, city)]
+        # Google often returns state/regional hits for small cities — keep the
+        # query-scoped RSS rather than returning empty and going mute.
+        if rss_hit:
+            rss = rss_hit
+        elif rss_scoped:
+            logger.info("city mention filter empty — using query-scoped RSS (%s)", city)
+            rss = rss_scoped
+        else:
+            rss = []
+    else:
+        rss = rss_scoped
 
     reporters = [a for a in published if a.get("provider") == "community"]
     app_local = [a for a in published if a.get("provider") == "genzcine"]
@@ -695,6 +776,10 @@ async def fetch_latest_news(
     global_wire = [a for a in global_wire if not _is_junk_title(str(a.get("title") or ""))]
     if city:
         official = [a for a in official if _mentions_query(a, city)]
+        matched_reporters = [a for a in reporters if _mentions_query(a, city)]
+        matched_local = [a for a in app_local if _mentions_query(a, city)]
+        reporters = matched_reporters or reporters[:2]
+        app_local = matched_local or app_local[:2]
     rss = _prefer_indian_papers(rss)
     official = _prefer_indian_papers(official)
     global_wire = _prefer_indian_papers(global_wire)

@@ -209,10 +209,28 @@ class _SarvamChunkedStream(tts.ChunkedStream):
         try:
             resp = await self._request(text, lang)
             if resp.status_code == 422 and not has_sarvam_script(text, language):
-                glue = script_glue(language)
-                if glue:
+                # Latin wire copy on Indic session: re-speak as en-IN instead of glue hack.
+                if language != "en":
                     await resp.aclose()
-                    resp = await self._request(glue + text, lang)
+                    language = "en"
+                    lang = SARVAM_TTS_CODE["en"]
+                    key = self._tts.cache_key(text, language)
+                    cached = cache.get(key) if cache.cacheable(text) else None
+                    if cached is not None:
+                        output_emitter.push(cached)
+                        output_emitter.flush()
+                        return
+                    resp = await self._request(text, lang)
+                else:
+                    glue = script_glue(language)
+                    if glue:
+                        await resp.aclose()
+                        resp = await self._request(glue + text, lang)
+            # One retry on transient overload / upstream blip.
+            if resp.status_code in (429, 500, 502, 503, 504):
+                await resp.aclose()
+                await asyncio.sleep(0.35)
+                resp = await self._request(text, lang)
             if resp.status_code >= 400:
                 err = (await resp.aread())[:400]
                 raise APIStatusError(
