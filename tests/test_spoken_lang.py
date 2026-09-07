@@ -120,6 +120,14 @@ def test_switch_only_phrases() -> None:
     assert not is_language_switch_only("\u092e\u0941\u091d\u0947 \u0926\u093f\u0932\u094d\u0932\u0940 \u0915\u0940 \u0916\u092c\u0930 \u0926\u094b")
 
 
+def test_is_news_ask() -> None:
+    from local_voice_ai.services.spoken_lang import is_news_ask
+
+    assert is_news_ask("Firozpur ki khabar batao")
+    assert is_news_ask("\u092e\u0941\u091d\u0947 \u0926\u093f\u0932\u094d\u0932\u0940 \u0915\u0940 \u0916\u092c\u0930 \u0926\u094b")
+    assert not is_news_ask("Hindi me bolo")
+
+
 def test_language_bridge_covers_all_sarvam_langs() -> None:
     for code in SARVAM_LANGS:
         assert language_bridge(code), code

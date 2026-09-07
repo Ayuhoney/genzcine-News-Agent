@@ -33,6 +33,14 @@ def test_language_switch_with_news_must_cover_silence() -> None:
     assert should_cover_language_switch_silence(switched=False, switch_only=False) is False
 
 
+def test_news_ask_also_covers_silence_even_without_lang_switch() -> None:
+    from local_voice_ai.agent import should_cover_turn_silence
+
+    assert should_cover_turn_silence(switched=False, news_ask=True, switch_only=False) is True
+    assert should_cover_turn_silence(switched=False, news_ask=False, switch_only=False) is False
+    assert should_cover_turn_silence(switched=True, news_ask=True, switch_only=True) is False
+
+
 def test_delayed_filler_only_while_silently_thinking() -> None:
     base = dict(
         agent_state="thinking",
@@ -171,10 +179,10 @@ async def test_switch_only_uses_bridge_not_filler_and_stops_llm(
 
 
 @pytest.mark.asyncio
-async def test_same_language_news_does_not_force_immediate_filler(
+async def test_same_language_news_speaks_thinking_filler(
     assistant: Assistant,
 ) -> None:
-    """Already Hindi — no language invalidate, so no immediate filler (delay path covers)."""
+    """Already Hindi news ask — still cover the news-tool wait (no mute)."""
     assistant._language = "hi"
     spoken: list[tuple] = []
 
@@ -196,17 +204,10 @@ async def test_same_language_news_does_not_force_immediate_filler(
             _user_msg("मुझे दिल्ली की खबर बताओ"),
         )
 
-    assert spoken == []
-    assert assistant._silence_filler_spoken is False
+    assert spoken, "news ask must speak immediate filler"
+    assert spoken[0][1] == thinking_filler("hi")
+    assert assistant._silence_filler_spoken is True
     upd.assert_not_called()
-    # Delayed path would still fire while thinking:
-    assert should_speak_delayed_thinking_filler(
-        agent_state="thinking",
-        silence_filler_spoken=assistant._silence_filler_spoken,
-        opening=False,
-        connected=True,
-        user_turn_active=True,
-    )
 
 
 @pytest.mark.asyncio

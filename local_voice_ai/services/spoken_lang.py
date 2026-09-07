@@ -182,6 +182,12 @@ _NEWS_ASK = re.compile(
     re.IGNORECASE,
 )
 
+
+def is_news_ask(text: str) -> bool:
+    """True when the viewer is asking for headlines / to be told something."""
+    return bool(_NEWS_ASK.search(text or ""))
+
+
 # Instant confirm while the LLM language addon catches up — same Priya voice.
 _LANG_BRIDGE = {
     "en": "Alright — switching to English.",
@@ -261,7 +267,7 @@ def thinking_filler(code: str) -> str:
 def is_language_switch_only(text: str) -> bool:
     """True when the viewer only asked to change language, not for news."""
     raw = text or ""
-    if _NEWS_ASK.search(raw):
+    if is_news_ask(raw):
         return False
     return any(pat.search(raw) for pat, _ in _SWITCHES)
 

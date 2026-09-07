@@ -76,37 +76,42 @@ async def test_fetch_latest_news_falls_back_to_rss(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_latest_news_falls_back_to_youtube(monkeypatch):
-    async def fake_community(*_args, **_kwargs):
+async def test_fetch_latest_news_city_fast_path_uses_rss(monkeypatch):
+    """City/topic asks skip national wires and still surface Google RSS."""
+    _HEADLINE_CACHE.clear()
+
+    async def fake_published(*_args, **_kwargs):
         return []
 
-    async def fake_newsdata(*_args, **_kwargs):
+    async def fake_rss(query, _language, limit):
+        if query and "Firozpur" in str(query):
+            return [
+                {
+                    "title": "Firozpur market opens early",
+                    "description": "Local update.",
+                    "link": "https://example.com/fz",
+                    "source": "Hindustan Times",
+                    "pubDate": "2026-09-07T10:00:00Z",
+                    "provider": "google_rss",
+                }
+            ][:limit]
         return []
 
-    async def fake_rss(*_args, **_kwargs):
-        return []
+    async def fake_official(*_args, **_kwargs):
+        raise AssertionError("city fast path must not await official paper RSS")
 
-    async def fake_youtube(_query, limit):
-        return [
-            {
-                "title": "Breaking: Tech summit opens",
-                "description": "Leaders gather.",
-                "link": "https://www.youtube.com/watch?v=abc123",
-                "source": "NDTV",
-                "pubDate": "2026-08-31T10:00:00Z",
-                "provider": "youtube",
-            }
-        ][:limit]
+    async def fake_global(*_args, **_kwargs):
+        raise AssertionError("city fast path must not await NewsData wire")
 
-    monkeypatch.setattr("local_voice_ai.services.news._fetch_published_news", fake_community)
-    monkeypatch.setattr("local_voice_ai.services.news._fetch_newsdata", fake_newsdata)
+    monkeypatch.setattr("local_voice_ai.services.news._fetch_published_news", fake_published)
     monkeypatch.setattr("local_voice_ai.services.news._fetch_google_rss", fake_rss)
-    monkeypatch.setattr("local_voice_ai.services.news._fetch_youtube_headlines", fake_youtube)
+    monkeypatch.setattr("local_voice_ai.services.news._fetch_official_paper_rss", fake_official)
+    monkeypatch.setattr("local_voice_ai.services.news._fetch_global_newsdata", fake_global)
 
-    articles = await fetch_latest_news(query="technology", limit=1)
+    articles = await fetch_latest_news(query="Firozpur", language="hi", limit=1)
     assert len(articles) == 1
-    assert articles[0]["provider"] == "youtube"
-    assert "youtube.com" in articles[0]["link"]
+    assert articles[0]["provider"] == "google_rss"
+    assert "Firozpur" in articles[0]["title"]
 
 
 def test_preferred_indian_papers_detected_and_boosted():

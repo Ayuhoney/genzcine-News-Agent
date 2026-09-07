@@ -22,7 +22,7 @@ GENZCINE_NEWS_API = os.getenv("GENZCINE_NEWS_API", "https://api.genzcine.com/v1/
 
 _CACHE_TTL_SEC = 20 * 60
 _HEADLINE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-_FETCH_DEADLINE_SEC = float(os.getenv("NEWS_FETCH_DEADLINE_SEC", "3.5"))
+_FETCH_DEADLINE_SEC = float(os.getenv("NEWS_FETCH_DEADLINE_SEC", "2.2"))
 _HTTP: httpx.AsyncClient | None = None
 
 
@@ -30,7 +30,7 @@ def _http() -> httpx.AsyncClient:
     global _HTTP
     if _HTTP is None or _HTTP.is_closed:
         _HTTP = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=1.5, read=3.2, write=3.2, pool=1.5),
+            timeout=httpx.Timeout(connect=1.2, read=2.5, write=2.5, pool=1.2),
             follow_redirects=True,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=60),
         )
@@ -649,6 +649,9 @@ async def fetch_latest_news(
 
     One spoken place only — never loops states or cities. National/India
     uses the India wire + paper RSS, not a 36-city crawl.
+
+    City asks use a fast path (published + Google RSS only) so the voice
+    turn does not wait on national paper / NewsData wires.
     """
     query = news_query_for(query)
     cache_key = _cache_key(query, language, limit)
@@ -658,16 +661,29 @@ async def fetch_latest_news(
 
     stale = _get_stale_articles(cache_key)
     city = (query or "").strip()
-
     paper_q = _preferred_paper_query(query)
-    published, rss, rss_papers, official, global_wire = await _wait_sources(
-        _fetch_published_news(query, limit),
-        _fetch_google_rss(query, language, limit),
-        _fetch_google_rss(paper_q, language, limit),
-        _fetch_official_paper_rss(limit),
-        _fetch_global_newsdata(language, limit),
-        timeout=_FETCH_DEADLINE_SEC,
-    )
+
+    if city:
+        # Fast path: skip national paper RSS + NewsData — city filter empties them
+        # most of the time anyway, and they burn the shared deadline.
+        published, rss, rss_papers = await _wait_sources(
+            _fetch_published_news(query, limit),
+            _fetch_google_rss(query, language, limit),
+            _fetch_google_rss(paper_q, language, limit),
+            timeout=_FETCH_DEADLINE_SEC,
+        )
+        official: list[dict[str, Any]] = []
+        global_wire: list[dict[str, Any]] = []
+    else:
+        published, rss, rss_papers, official, global_wire = await _wait_sources(
+            _fetch_published_news(query, limit),
+            _fetch_google_rss(query, language, limit),
+            _fetch_google_rss(paper_q, language, limit),
+            _fetch_official_paper_rss(limit),
+            _fetch_global_newsdata(language, limit),
+            timeout=_FETCH_DEADLINE_SEC,
+        )
+
     rss = _merge_articles(rss, rss_papers, limit=max(limit * 3, 12))
     rss = [a for a in rss if not _is_junk_title(str(a.get("title") or ""))]
     if city:

@@ -38,6 +38,7 @@ from .services.spoken_lang import (
     SPOKEN_TO_SESSION,
     detect_spoken_lang,
     is_language_switch_only,
+    is_news_ask,
     is_stt_garbage,
     language_bridge,
     thinking_filler,
@@ -177,9 +178,9 @@ def _llm_client_options() -> dict:
     local = _is_local_service_url(LLM_BASE_URL)
     read_s = float(os.getenv("LLM_READ_TIMEOUT", "120" if local else "30"))
     opts: dict = {
-        "max_completion_tokens": int(os.getenv("LLM_MAX_COMPLETION_TOKENS", "120")),
+        "max_completion_tokens": int(os.getenv("LLM_MAX_COMPLETION_TOKENS", "80")),
         # Lower = steadier anchor voice, fewer rambling second sentences.
-        "temperature": float(os.getenv("LLM_TEMPERATURE", "0.5")),
+        "temperature": float(os.getenv("LLM_TEMPERATURE", "0.4")),
         "timeout": httpx.Timeout(connect=5.0, read=read_s, write=8.0, pool=5.0),
         # Groq free tier: a 429 retried four times in ~4s only digs the hole
         # deeper — the session cooldown (_pause_llm) handles it. Elsewhere one
@@ -217,7 +218,7 @@ async def _warm_headline_cache(agent: "Assistant", query: str | None = None) -> 
         logger.exception("headline cache warm failed")
 
 
-NEWS_HEADLINE_LIMIT = int(os.getenv("NEWS_HEADLINE_LIMIT", "8"))
+NEWS_HEADLINE_LIMIT = int(os.getenv("NEWS_HEADLINE_LIMIT", "5"))
 # 0 = next headline starts as soon as the anchor finishes the previous one.
 HEADLINE_CONTINUE_SECONDS = float(os.getenv("HEADLINE_CONTINUE_SECONDS", "0"))
 # After the viewer stops speaking, wait this long for the agent to respond before
@@ -229,12 +230,21 @@ CONVERSATION_IDLE_SECONDS = float(os.getenv("CONVERSATION_IDLE_SECONDS", "12"))
 REPLY_NUDGE_RETRIES = max(1, int(os.getenv("REPLY_NUDGE_RETRIES", "3")))
 REPLY_NUDGE_DELAY_SECONDS = float(os.getenv("REPLY_NUDGE_DELAY_SECONDS", "1.2"))
 # Speak a short hold line if the agent stays in "thinking" this long (LLM + news tool).
-THINKING_FILLER_DELAY_SECONDS = float(os.getenv("THINKING_FILLER_DELAY_SECONDS", "0.9"))
+THINKING_FILLER_DELAY_SECONDS = float(os.getenv("THINKING_FILLER_DELAY_SECONDS", "0.45"))
+# How many headlines the LLM is shown per tool call (spoken mix stays NEWS_HEADLINE_LIMIT).
+LLM_NEWS_LINES = max(1, int(os.getenv("LLM_NEWS_LINES", "3")))
+
+
+def should_cover_turn_silence(*, switched: bool, news_ask: bool, switch_only: bool) -> bool:
+    """Immediate hold line when this turn will wait on LLM restart and/or news fetch."""
+    if switch_only:
+        return False
+    return bool(switched) or bool(news_ask)
 
 
 def should_cover_language_switch_silence(*, switched: bool, switch_only: bool) -> bool:
     """Immediate filler when a language change invalidates preemptive LLM work."""
-    return bool(switched) and not bool(switch_only)
+    return should_cover_turn_silence(switched=switched, news_ask=False, switch_only=switch_only)
 
 
 def should_speak_delayed_thinking_filler(
@@ -311,9 +321,10 @@ def _pause_llm(seconds: float) -> None:
     logger.info("LLM cooldown %.0fs — skip generate_reply until it expires", wait)
 
 _BASE_INSTRUCTIONS = """
-You are {anchor_name}, GenzCine news anchor (Mohali, genzcine.com). Voice only — 1-2 short sentences.
+You are {anchor_name}, GenzCine news anchor (Mohali, genzcine.com). Voice only — ONE short sentence, two max.
 Opening already played; do not greet again or ask their city.
-Call get_latest_news before any current news; never invent. play_news_video only if they ask for a clip.
+Call get_latest_news before any current news; never invent. Speak 1 top headline from the tool result, then stop.
+play_news_video only if they ask for a clip.
 Understand English and Indian languages (Hindi, Punjabi, Bengali, Tamil, Telugu, Kannada, Malayalam, Marathi, Gujarati, Odia) including Hinglish.
 City names in any script are places, not language locks. Reply in the active session language's native script.
 No <think>, lists, or plan-narration.
@@ -597,12 +608,10 @@ class Assistant(Agent):
         """Runs once per user turn, before the LLM call — the one place to shape it.
 
         - Whisper prompt echo / hallucination → StopResponse (no LLM, no history).
-        - City mishears fixed in the message the LLM actually sees.
+        - City mishears fixed; preferred_location sticky for cache-aligned news fetch.
         - Language switch: TTS flips now; turn_ctx instructions for THIS reply;
-          agent instruction commit deferred until real speech (avoids an extra
-          chat_ctx mutation racing preemptive generation).
-        - Mid-switch news asks get an immediate thinking filler so invalidated
-          preemptive work does not leave dead air.
+          agent instruction commit deferred until real speech.
+        - News asks / language flips get an immediate thinking filler — no dead air.
         - "Hindi me bolo" alone → spoken confirm, no LLM call.
         - History capped so prompt size stays flat over a long session.
         """
@@ -619,6 +628,14 @@ class Assistant(Agent):
             logger.info("STT place correction: %r → %r", raw[:80], text[:80])
             new_message.content = [text]
 
+        # Stick city early so STT warm-cache and get_latest_news share one key.
+        place = extract_place(text)
+        if place:
+            sticky = news_query_for(place) or place
+            if sticky and sticky != self._preferred_location:
+                self._preferred_location = sticky
+                logger.info("preferred location → %s", sticky)
+
         heard = detect_spoken_lang(raw, self._last_whisper_lang, current=self._spoken_code())
         switched = False
         if heard:
@@ -630,8 +647,11 @@ class Assistant(Agent):
                 _ctx_update_instructions(
                     turn_ctx, instructions=self._instructions_text(), add_if_missing=True
                 )
-                place = extract_place(text) or self._preferred_location or None
-                asyncio.create_task(_warm_headline_cache(self, place))
+        news_ask = is_news_ask(text)
+        if news_ask or switched:
+            asyncio.create_task(
+                _warm_headline_cache(self, self._preferred_location or place or None)
+            )
         if switched and is_language_switch_only(text):
             bridge = language_bridge(heard)
             logger.info("language switch only → bridge, no LLM")
@@ -642,14 +662,17 @@ class Assistant(Agent):
                 self._pending_lang_commit = False
             raise StopResponse()
 
-        # Language switch invalidates preemptive generation — cover the restart gap.
-        if should_cover_language_switch_silence(switched=switched, switch_only=False) and heard:
-            filler = thinking_filler(heard)
+        # Cover LLM restart / news-tool wait so Simli never looks frozen.
+        if should_cover_turn_silence(
+            switched=switched, news_ask=news_ask, switch_only=False
+        ):
+            code = heard or self._spoken_code()
+            filler = thinking_filler(code)
             if filler:
-                logger.info("language switch → thinking filler (%s)", heard)
+                logger.info("turn silence cover → filler (%s switched=%s news=%s)", code, switched, news_ask)
                 self._filler_speaking = True
                 self._silence_filler_spoken = True
-                await self._say_language(heard, filler, wait=False)
+                await self._say_language(code, filler, wait=False)
 
         # Cap persisted history. The copy for this turn is already made, so this
         # takes effect from the next turn and never invalidates preemptive work.
@@ -822,14 +845,14 @@ class Assistant(Agent):
             )
         await self._publish_headlines(articles, topic=topic or "")
         lines = []
-        for a in articles[:4]:
+        for a in articles[:LLM_NEWS_LINES]:
             tag = ""
             if a.get("provider") == "community":
                 tag = " [GenzCine]"
             elif a.get("provider") == "genzcine":
                 tag = " [local]"
             lines.append(f"- {a['title']} ({a['source']}){tag}")
-        return "Headlines:\n" + "\n".join(lines)
+        return "Headlines:\n" + "\n".join(lines) + "\nSpeak only the first headline in one short sentence."
 
     @function_tool
     async def play_news_video(self, context: RunContext, topic: str) -> str:
@@ -1049,8 +1072,8 @@ async def my_agent(ctx: JobContext) -> None:
                 "false_interruption_timeout": 1.0,
             },
             "endpointing": {
-                "min_delay": 0.20,
-                "max_delay": 1.2,
+                "min_delay": 0.15,
+                "max_delay": 0.85,
             },
             "preemptive_generation": {
                 # Starts the LLM on the final STT text while the turn detector is
