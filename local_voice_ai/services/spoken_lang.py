@@ -197,6 +197,21 @@ _LANG_BRIDGE = {
     "od": "\u0b20\u0b3f\u0b15, \u0b0f\u0b2c\u0b47 \u0b13\u0b21\u0b3c\u0b3f\u0b06\u0b30\u0b47 \u0b15\u0b25\u0b3e\u0b39\u0b47\u0b2c\u0b3f.",
 }
 
+# Covers LLM + news-tool silence so the avatar does not look frozen.
+_THINKING_FILLER = {
+    "en": "One second\u2026",
+    "hi": "\u090f\u0915 \u0938\u0947\u0915\u0902\u0921\u2026",
+    "pa": "\u0a07\u0a71\u0a15 \u0a38\u0a15\u0a3f\u0a70\u0a1f\u2026",
+    "bn": "\u098f\u0995 \u09b8\u09c7\u0995\u09c7\u09a8\u09cd\u09a1\u2026",
+    "ta": "\u0b92\u0bb0\u0bc1 \u0ba8\u0bca\u0b9f\u0bbf\u2026",
+    "te": "\u0c12\u0c15\u0c4d\u0c15 \u0c15\u0c4d\u0c37\u0c23\u0c02\u2026",
+    "kn": "\u0c92\u0c82\u0ca6\u0cc1 \u0c95\u0ccd\u0cb7\u0ca3\u2026",
+    "ml": "\u0d12\u0d30\u0d41 \u0d28\u0d3f\u0d2e\u0d3f\u0d37\u0d02\u2026",
+    "mr": "\u090f\u0915 \u0938\u0947\u0915\u0902\u0926\u2026",
+    "gu": "\u0a8f\u0a95 \u0ab8\u0ac7\u0a95\u0aa8\u0acd\u0aa1\u2026",
+    "od": "\u0b17\u0b4b\u0b1f\u0b3f\u0b0f \u0b38\u0b47\u0b15\u0b47\u0b23\u0b4d\u0b21\u2026",
+}
+
 # Native glue when Bulbul 422s on Latin-only text in an Indic session.
 _SCRIPT_GLUE = {
     "hi": "\u091c\u0940\u0964 ",
@@ -236,6 +251,11 @@ def is_stt_garbage(text: str) -> bool:
 def language_bridge(code: str) -> str:
     """Short confirm line in the new TTS language (same Priya voice)."""
     return _LANG_BRIDGE.get(code, "")
+
+
+def thinking_filler(code: str) -> str:
+    """Very short hold line while LLM / news fetch is in flight."""
+    return _THINKING_FILLER.get(code, _THINKING_FILLER["en"])
 
 
 def is_language_switch_only(text: str) -> bool:

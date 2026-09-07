@@ -40,6 +40,7 @@ from .services.spoken_lang import (
     is_language_switch_only,
     is_stt_garbage,
     language_bridge,
+    thinking_filler,
 )
 from .services.studio_events import STUDIO_TOPIC, headline_article, publish_studio_event
 from .services.youtube import search_news_video
@@ -227,6 +228,37 @@ BULLETIN_RESUME_AFTER_USER_SECONDS = float(os.getenv("BULLETIN_RESUME_AFTER_USER
 CONVERSATION_IDLE_SECONDS = float(os.getenv("CONVERSATION_IDLE_SECONDS", "12"))
 REPLY_NUDGE_RETRIES = max(1, int(os.getenv("REPLY_NUDGE_RETRIES", "3")))
 REPLY_NUDGE_DELAY_SECONDS = float(os.getenv("REPLY_NUDGE_DELAY_SECONDS", "1.2"))
+# Speak a short hold line if the agent stays in "thinking" this long (LLM + news tool).
+THINKING_FILLER_DELAY_SECONDS = float(os.getenv("THINKING_FILLER_DELAY_SECONDS", "0.9"))
+
+
+def should_cover_language_switch_silence(*, switched: bool, switch_only: bool) -> bool:
+    """Immediate filler when a language change invalidates preemptive LLM work."""
+    return bool(switched) and not bool(switch_only)
+
+
+def should_speak_delayed_thinking_filler(
+    *,
+    agent_state: str,
+    silence_filler_spoken: bool,
+    opening: bool,
+    connected: bool,
+    user_turn_active: bool,
+) -> bool:
+    """True after THINKING_FILLER_DELAY_SECONDS if the agent is still silently thinking."""
+    return (
+        agent_state == "thinking"
+        and not silence_filler_spoken
+        and not opening
+        and connected
+        and user_turn_active
+    )
+
+
+def should_wait_after_filler_speech(*, agent_state: str) -> bool:
+    """Filler ended — do not open conversation idle while the real reply is still in flight."""
+    return agent_state in ("thinking", "speaking")
+
 REPLY_NUDGE_RETRY_GAP_SECONDS = float(os.getenv("REPLY_NUDGE_RETRY_GAP_SECONDS", "1.0"))
 _HEADLINE_BRIDGES = (
     "Next up in today's news.",
@@ -545,6 +577,10 @@ class Assistant(Agent):
         self._tts_router: LanguageRoutedTTS | None = None
         self._last_whisper_lang: str | None = None
         self._opening = False
+        # Silence cover: set when a filler already spoke this turn; avoid doubles.
+        self._silence_filler_spoken = False
+        self._filler_speaking = False
+        self._pending_lang_commit = False
 
         super().__init__(instructions=self._instructions_text())
 
@@ -562,11 +598,17 @@ class Assistant(Agent):
 
         - Whisper prompt echo / hallucination → StopResponse (no LLM, no history).
         - City mishears fixed in the message the LLM actually sees.
-        - Language switch: TTS + instructions flip for THIS reply (no bridge
-          line, no second generate_reply, no preemptive race).
+        - Language switch: TTS flips now; turn_ctx instructions for THIS reply;
+          agent instruction commit deferred until real speech (avoids an extra
+          chat_ctx mutation racing preemptive generation).
+        - Mid-switch news asks get an immediate thinking filler so invalidated
+          preemptive work does not leave dead air.
         - "Hindi me bolo" alone → spoken confirm, no LLM call.
         - History capped so prompt size stays flat over a long session.
         """
+        self._silence_filler_spoken = False
+        self._filler_speaking = False
+
         raw = (new_message.text_content or "").strip()
         if is_stt_garbage(raw):
             logger.info("turn skipped (stt garbage): %r", raw[:100])
@@ -580,19 +622,34 @@ class Assistant(Agent):
         heard = detect_spoken_lang(raw, self._last_whisper_lang, current=self._spoken_code())
         switched = False
         if heard:
-            switched = await self.apply_spoken_language(heard, update_llm=True)
+            # TTS only here — agent.update_instructions waits until speech starts.
+            switched = await self.apply_spoken_language(heard, update_llm=False)
             if switched:
-                # update_instructions() persists for later turns; the LLM call for
-                # this turn uses turn_ctx, which was copied before we ran.
+                self._pending_lang_commit = True
+                # This turn's LLM copy still needs the language addon.
                 _ctx_update_instructions(
                     turn_ctx, instructions=self._instructions_text(), add_if_missing=True
                 )
+                place = extract_place(text) or self._preferred_location or None
+                asyncio.create_task(_warm_headline_cache(self, place))
         if switched and is_language_switch_only(text):
             bridge = language_bridge(heard)
             logger.info("language switch only → bridge, no LLM")
             if bridge:
                 await self._say_language(heard, bridge, wait=False)
+            if self._pending_lang_commit:
+                await self._commit_language_instructions()
+                self._pending_lang_commit = False
             raise StopResponse()
+
+        # Language switch invalidates preemptive generation — cover the restart gap.
+        if should_cover_language_switch_silence(switched=switched, switch_only=False) and heard:
+            filler = thinking_filler(heard)
+            if filler:
+                logger.info("language switch → thinking filler (%s)", heard)
+                self._filler_speaking = True
+                self._silence_filler_spoken = True
+                await self._say_language(heard, filler, wait=False)
 
         # Cap persisted history. The copy for this turn is already made, so this
         # takes effect from the next turn and never invalidates preemptive work.
@@ -1123,6 +1180,7 @@ async def my_agent(ctx: JobContext) -> None:
         "resume_task": None,
         "reply_nudge_task": None,
         "conversation_idle_task": None,
+        "thinking_filler_task": None,
         "failures": 0,
         "resume_line_index": 0,
     }
@@ -1453,8 +1511,74 @@ async def my_agent(ctx: JobContext) -> None:
         if task and not task.done():
             task.cancel()
 
+    def _cancel_thinking_filler() -> None:
+        task = _bc.get("thinking_filler_task")
+        if task and not task.done():
+            task.cancel()
+        _bc["thinking_filler_task"] = None
+
+    def _schedule_thinking_filler() -> None:
+        """If LLM/news stays silent, speak a short hold line so Simli doesn't look dead."""
+        _cancel_thinking_filler()
+
+        async def _wait() -> None:
+            try:
+                await asyncio.sleep(THINKING_FILLER_DELAY_SECONDS)
+            except asyncio.CancelledError:
+                return
+            if not should_speak_delayed_thinking_filler(
+                agent_state=session.agent_state,
+                silence_filler_spoken=agent._silence_filler_spoken,
+                opening=agent._opening,
+                connected=ctx.room.isconnected(),
+                user_turn_active=_bc["user_turn_active"],
+            ):
+                return
+            code = agent._spoken_code()
+            line = thinking_filler(code)
+            if not line:
+                return
+            logger.info("thinking filler after %.1fs (%s)", THINKING_FILLER_DELAY_SECONDS, code)
+            agent._filler_speaking = True
+            agent._silence_filler_spoken = True
+            await agent._say_language(code, line, wait=False)
+
+        _bc["thinking_filler_task"] = asyncio.create_task(_wait())
+
+    async def _after_filler_speech() -> None:
+        """Filler ended — only open the conversation window if the real reply is done."""
+        try:
+            await asyncio.sleep(0.4)
+        except asyncio.CancelledError:
+            return
+        if should_wait_after_filler_speech(agent_state=session.agent_state):
+            logger.info("thinking filler done — waiting for real reply")
+            return
+        if not (_bc["user_turn_active"] and _bc["agent_responding_to_user"]):
+            return
+        logger.info(
+            "agent reply done — conversation window open (%ss)",
+            CONVERSATION_IDLE_SECONDS,
+        )
+        _bc["agent_responding_to_user"] = False
+        _mark_conversation_mode()
+        await _publish_mode("conversation")
+        _schedule_conversation_idle()
+
     def _on_agent_state_changed(ev) -> None:
         try:
+            if ev.new_state == "thinking" and _bc["paused"] and _bc["user_turn_active"]:
+                # Filler may end straight into thinking without a listening gap.
+                agent._filler_speaking = False
+                _schedule_thinking_filler()
+            elif ev.new_state == "speaking":
+                _cancel_thinking_filler()
+                if agent._pending_lang_commit:
+                    agent._pending_lang_commit = False
+                    asyncio.create_task(agent._commit_language_instructions())
+            else:
+                _cancel_thinking_filler()
+
             if ev.new_state in ("thinking", "speaking") and _bc["paused"]:
                 _cancel_resume_task()
                 _cancel_reply_nudge()
@@ -1466,6 +1590,10 @@ async def my_agent(ctx: JobContext) -> None:
                     else:
                         logger.info("agent thinking — holding bulletin and nudge")
             elif ev.old_state == "speaking" and ev.new_state in ("listening", "idle"):
+                if agent._filler_speaking:
+                    agent._filler_speaking = False
+                    asyncio.create_task(_after_filler_speech())
+                    return
                 if _bc["user_turn_active"]:
                     if _bc["agent_responding_to_user"]:
                         logger.info(
@@ -1492,6 +1620,7 @@ async def my_agent(ctx: JobContext) -> None:
                 _cancel_resume_task()
                 _cancel_reply_nudge()
                 _cancel_conversation_idle()
+                _cancel_thinking_filler()
                 if not _bc["conversation_mode"]:
                     asyncio.create_task(_enter_conversation_mode())
                 task = _bc.get("continue_task")

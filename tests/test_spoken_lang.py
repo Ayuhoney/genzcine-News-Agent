@@ -128,6 +128,15 @@ def test_language_bridge_covers_all_sarvam_langs() -> None:
     assert "English" in language_bridge("en")
 
 
+def test_thinking_filler_covers_all_sarvam_langs() -> None:
+    from local_voice_ai.services.spoken_lang import thinking_filler
+
+    for code in SARVAM_LANGS:
+        assert thinking_filler(code), code
+    assert thinking_filler("hi").startswith("\u090f\u0915")
+    assert "second" in thinking_filler("en").lower() or "\u2026" in thinking_filler("en")
+
+
 def test_tts_lang_script_is_strict() -> None:
     assert tts_lang_for_text("\u0928\u092e\u0938\u094d\u0924\u0947", "en") == "hi"
     assert tts_lang_for_text("\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32", "en") == "pa"
