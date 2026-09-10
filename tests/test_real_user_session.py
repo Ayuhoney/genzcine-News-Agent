@@ -187,6 +187,62 @@ def test_real_user_headline_sounds_natural_in_hindi_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_real_user_question_during_intro_is_accepted(viewer: Assistant) -> None:
+    """Previously _opening dropped ALL STT — 'tell me next question' vanished."""
+    viewer._opening = True
+    await _turn(viewer, "Okay, tell me next question.", whisper="en")
+    assert viewer._opening is False
+
+
+@pytest.mark.asyncio
+async def test_real_user_intro_ack_does_not_abort_open(viewer: Assistant) -> None:
+    viewer._opening = True
+    with (
+        patch("local_voice_ai.agent._ctx_update_instructions"),
+        patch("local_voice_ai.agent._warm_headline_cache", new_callable=AsyncMock),
+        patch("local_voice_ai.agent.asyncio.create_task", side_effect=_spawn_close),
+    ):
+        with pytest.raises(StopResponse):
+            await viewer.on_user_turn_completed(
+                lk_llm.ChatContext.empty(),
+                _msg("Thank you."),
+            )
+    assert viewer._opening is True
+
+
+@pytest.mark.asyncio
+async def test_opening_cut_stops_trilingual_midway(viewer: Assistant) -> None:
+    """Barge-in must abort remaining ident segments (no leftover Sat Sri Akal)."""
+    spoken: list[str] = []
+
+    async def _capture(code: str, line: str, *, wait: bool = True) -> None:
+        spoken.append(code)
+        # Simulate viewer barge-in after Hindi namaste.
+        viewer._opening = False
+        viewer._opening_cut = True
+
+    viewer._opening = True
+    viewer._opening_cut = False
+    viewer._say_language = AsyncMock(side_effect=_capture)
+    viewer._can_speak = lambda: True  # type: ignore[method-assign]
+    await viewer._speak_trilingual_open(None)
+    assert spoken == ["hi"]
+    assert viewer._opening_cut is True
+
+
+@pytest.mark.asyncio
+async def test_resume_bridge_is_language_matched() -> None:
+    from local_voice_ai.agent import _resume_bridge_for
+
+    code, line = _resume_bridge_for("hi", 0)
+    assert code == "hi"
+    assert "\u0916\u092c\u0930" in line
+    code_en, line_en = _resume_bridge_for("en", 0)
+    assert code_en == "en"
+    assert "headlines" in line_en.lower()
+
+
+@pytest.mark.asyncio
 async def test_real_user_tool_place_updates_sticky_and_reports(viewer: Assistant) -> None:
     viewer._language = "hi"
     viewer._preferred_location = "Mohali"

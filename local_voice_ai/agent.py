@@ -38,6 +38,7 @@ from .services.spoken_lang import (
     SPOKEN_TO_SESSION,
     detect_spoken_lang,
     has_sarvam_script,
+    is_intro_ack,
     is_language_switch_only,
     is_news_ask,
     is_stt_garbage,
@@ -224,7 +225,7 @@ NEWS_HEADLINE_LIMIT = int(os.getenv("NEWS_HEADLINE_LIMIT", "5"))
 HEADLINE_CONTINUE_SECONDS = float(os.getenv("HEADLINE_CONTINUE_SECONDS", "0"))
 # After the viewer stops speaking, wait this long for the agent to respond before
 # resuming the bulletin when no reply was generated (STT miss / LLM stall).
-BULLETIN_RESUME_AFTER_USER_SECONDS = float(os.getenv("BULLETIN_RESUME_AFTER_USER_SECONDS", "10"))
+BULLETIN_RESUME_AFTER_USER_SECONDS = float(os.getenv("BULLETIN_RESUME_AFTER_USER_SECONDS", "4"))
 # After the agent finishes a reply, keep the bulletin paused this long so the viewer
 # can ask follow-ups. Timer resets on each new final STT line.
 CONVERSATION_IDLE_SECONDS = float(os.getenv("CONVERSATION_IDLE_SECONDS", "12"))
@@ -289,20 +290,73 @@ _HEADLINE_BRIDGES_PA = (
     "ਇਸ ਤੋਂ ਇਲਾਵਾ।",
     "ਅੱਗੇ ਵਧਦੇ ਹਾਂ।",
 )
-_CONVERSATION_RESUME_LINES = (
-    "Alright, back to today's headlines.",
-    "Let's pick up the bulletin where we left off.",
-    "Great question — here's more from today's news.",
-)
+_CONVERSATION_RESUME = {
+    "en": (
+        "Alright, back to today's headlines.",
+        "Let's pick up the bulletin where we left off.",
+        "Great question — here's more from today's news.",
+    ),
+    "hi": (
+        "\u091c\u0940, \u0935\u093e\u092a\u0938 \u0906\u091c \u0915\u0940 \u0916\u092c\u0930\u094b\u0902 \u092a\u0930 \u0906\u0924\u0947 \u0939\u0948\u0902\u0964",
+        "\u091a\u0932\u093f\u090f, \u092c\u0941\u0932\u0947\u091f\u093f\u0928 \u091c\u093e\u0930\u0940 \u0930\u0939\u093e \u0925\u093e\u0964",
+        "\u0905\u091a\u094d\u091b\u093e \u0938\u0935\u093e\u0932 \u2014 \u0906\u091c \u0915\u0940 \u0914\u0930 \u0916\u092c\u0930\u0947\u0902\u0964",
+    ),
+    "pa": (
+        "\u0a1c\u0a40, \u0a35\u0a3e\u0a2a\u0a38 \u0a05\u0a71\u0a1c \u0a26\u0a40\u0a06\u0a02 \u0a16\u0a3c\u0a2c\u0a30\u0a3e\u0a02 \u0a35\u0a71\u0a32 \u0a06\u0a09\u0a02\u0a26\u0a47 \u0a39\u0a3e\u0a02\u0964",
+        "\u0a1a\u0a32\u0a4b, \u0a2c\u0a41\u0a32\u0a47\u0a1f\u0a3f\u0a28 \u0a1c\u0a3f\u0a71\u0a25\u0a4b\u0a02 \u0a24\u0a4b\u0a02 \u0a30\u0a39\u0a3f\u0a06\u0a02\u0964",
+        "\u0a35\u0a27\u0a40\u0a06 \u0a38\u0a35\u0a3e\u0a32 \u2014 \u0a05\u0a71\u0a1c \u0a26\u0a40\u0a06\u0a02 \u0a39\u0a4b\u0a30 \u0a16\u0a3c\u0a2c\u0a30\u0a3e\u0a02\u0964",
+    ),
+}
 
-_TRIAL_WARN_SAY = (
-    "Just a heads up — about one minute left in your free GenzCine trial. "
-    "Visit genzcine dot com for unlimited live news with me."
-)
-_TRIAL_END_SAY = (
-    "Your free trial has ended. Thanks for watching today's news with GenzCine! "
-    "Unlock unlimited access at genzcine dot com. Goodbye for now!"
-)
+_TRIAL_WARN_SAY = {
+    "en": (
+        "Just a heads up — about one minute left in your free GenzCine trial. "
+        "Visit genzcine dot com for unlimited live news with me."
+    ),
+    "hi": (
+        "\u091c\u0940, \u090f\u0915 \u092c\u093e\u0924 \u2014 \u0906\u092a\u0915\u0947 free GenzCine trial \u092e\u0947\u0902 \u0932\u0917\u092d\u0917 \u090f\u0915 \u092e\u093f\u0928\u091f \u092c\u091a\u093e \u0939\u0948\u0964 "
+        "\u0905\u0938\u0940\u092e\u093f\u0924 \u0928\u094d\u092f\u0942\u091c\u093c \u0915\u0947 \u0932\u093f\u090f genzcine dot com \u0926\u0947\u0916\u0947\u0902\u0964"
+    ),
+    "pa": (
+        "\u0a1c\u0a40, \u0a07\u0a71\u0a15 \u0a17\u0a71\u0a32 \u2014 \u0a24\u0a41\u0a39\u0a3e\u0a21\u0a47 free GenzCine trial \u0a35\u0a3f\u0a71\u0a1a \u0a32\u0a17\u0a2d\u0a17 \u0a07\u0a71\u0a15 \u0a2e\u0a3f\u0a70\u0a1f \u0a2c\u0a1a\u0a3f\u0a06 \u0a39\u0a48\u0964 "
+        "\u0a05\u0a38\u0a40\u0a2e\u0a3f\u0a24 \u0a16\u0a3c\u0a2c\u0a30\u0a3e\u0a02 \u0a32\u0a08 genzcine dot com \u0a35\u0a47\u0a16\u0a4b\u0964"
+    ),
+}
+_TRIAL_END_SAY = {
+    "en": (
+        "Your free trial has ended. Thanks for watching today's news with GenzCine! "
+        "Unlock unlimited access at genzcine dot com. Goodbye for now!"
+    ),
+    "hi": (
+        "\u0906\u092a\u0915\u093e free trial \u0916\u0924\u094d\u092e \u0939\u094b \u0917\u092f\u093e\u0964 GenzCine \u0915\u0947 \u0938\u093e\u0925 \u0906\u091c \u0915\u0940 \u0916\u092c\u0930\u0947\u0902 \u0926\u0947\u0916\u0928\u0947 \u0915\u093e \u0927\u0928\u094d\u092f\u0935\u093e\u0926\u0964 "
+        "genzcine dot com \u092a\u0930 \u0905\u0938\u0940\u092e\u093f\u0924 \u0905\u0915\u094d\u0938\u0947\u0938 \u0916\u094b\u0932\u0947\u0902\u0964 \u092b\u093f\u0930 \u092e\u093f\u0932\u0924\u0947 \u0939\u0948\u0902!"
+    ),
+    "pa": (
+        "\u0a24\u0a41\u0a39\u0a3e\u0a21\u0a3e free trial \u0a16\u0a24\u0a2e \u0a39\u0a4b \u0a17\u0a3f\u0a06 \u0a39\u0a48\u0964 GenzCine \u0a28\u0a3e\u0a32 \u0a05\u0a71\u0a1c \u0a26\u0a40\u0a06\u0a02 \u0a16\u0a3c\u0a2c\u0a30\u0a3e\u0a02 \u0a35\u0a47\u0a16\u0a23 \u0a32\u0a08 \u0a27\u0a70\u0a28\u0a35\u0a3e\u0a26\u0964 "
+        "genzcine dot com \u0a24\u0a47 \u0a05\u0a38\u0a40\u0a2e\u0a3f\u0a24 \u0a05\u0a15\u0a38\u0a48\u0a71\u0a38 \u0a16\u0a4b\u0a32\u0a4d\u0a39\u0a4b\u0964 \u0a2b\u0a3f\u0a30 \u0a2e\u0a3f\u0a32\u0a26\u0a47 \u0a39\u0a3e\u0a02!"
+    ),
+}
+
+
+def _resume_bridge_for(spoken: str, index: int) -> tuple[str, str]:
+    """Language-matched idle→bulletin bridge. Falls back to English."""
+    code = spoken if spoken in _CONVERSATION_RESUME else "en"
+    lines = _CONVERSATION_RESUME[code]
+    return code, lines[index % len(lines)]
+
+
+def _trial_line(kind: str, spoken: str) -> str:
+    table = _TRIAL_WARN_SAY if kind == "warn" else _TRIAL_END_SAY
+    return table.get(spoken) or table["en"]
+
+
+def _is_avatar_identity(identity: str | None) -> bool:
+    low = (identity or "").lower()
+    return "simli" in low or "avatar" in low
+
+
+def _human_participant_names(participants: dict[str, str]) -> list[str]:
+    return [name for ident, name in participants.items() if not _is_avatar_identity(ident)]
 
 
 LLM_OPTS = _llm_client_options()
@@ -603,6 +657,8 @@ class Assistant(Agent):
         self._tts_router: LanguageRoutedTTS | None = None
         self._last_whisper_lang: str | None = None
         self._opening = False
+        self._opening_cut = False
+        self._viewer_gone = False
         # Silence cover: set when a filler already spoke this turn; avoid doubles.
         self._silence_filler_spoken = False
         self._filler_speaking = False
@@ -637,8 +693,21 @@ class Assistant(Agent):
         if is_stt_garbage(raw):
             logger.info("turn skipped (stt garbage): %r", raw[:100])
             raise StopResponse()
+        if self._opening and is_intro_ack(raw):
+            logger.info("turn skipped (intro ack): %r", raw[:100])
+            raise StopResponse()
+        if self._opening:
+            logger.info("turn during intro — ending open for reply")
+            self._opening = False
+            self._opening_cut = True
         if _llm_cooling():
-            logger.info("turn skipped — LLM cooldown active")
+            # Don't go mute — warm hold so Simli keeps moving while cooldown drains.
+            code = self._spoken_code()
+            logger.info("turn covered — LLM cooldown active (%s)", code)
+            try:
+                await self._say_language(code, thinking_filler(code), wait=False)
+            except Exception:
+                logger.exception("cooldown filler failed")
             raise StopResponse()
 
         text = _correct_place_transcript(raw, collapse=False)
@@ -737,6 +806,8 @@ class Assistant(Agent):
         viewer_name: str | None = None,
     ) -> bool:
         """Speak the next headline via TTS only — no LLM call (saves tokens)."""
+        if self._opening_cut or not self._can_speak():
+            return False
         if (
             not self._last_headlines
             or self._headline_index >= len(self._last_headlines)
@@ -766,6 +837,8 @@ class Assistant(Agent):
         return True
 
     def _can_speak(self) -> bool:
+        if self._viewer_gone:
+            return False
         room = self._room
         if room is not None and not room.isconnected():
             return False
@@ -801,10 +874,11 @@ class Assistant(Agent):
     async def _speak_trilingual_open(self, viewer_name: str | None) -> None:
         """Namaste (hi) → Sat Sri Akal (pa) → English ident — all Sarvam Priya."""
         for code, line in _tv_open_segments(self._anchor_name, viewer_name):
-            if not self._can_speak():
+            if not self._can_speak() or self._opening_cut or not self._opening:
+                logger.info("trilingual open aborted (cut=%s)", self._opening_cut)
                 return
             await self._say_language(code, line)
-        if self._tts_router is not None:
+        if self._tts_router is not None and self._opening and not self._opening_cut:
             self._tts_router.set_spoken("en")
 
     def _spoken_mapped(self, code: str) -> str | None:
@@ -960,7 +1034,7 @@ class Assistant(Agent):
                 room.on("participant_connected", self._on_participant_connected)
                 room.on("participant_disconnected", self._on_participant_disconnected)
 
-            participant_names = list(self._participants.values())
+            participant_names = _human_participant_names(self._participants)
             asyncio.create_task(_warm_headline_cache(self))
 
             if self._session_type == "group":
@@ -969,20 +1043,29 @@ class Assistant(Agent):
                 viewer_name = participant_names[0] if participant_names else None
 
             self._opening = True
+            self._opening_cut = False
             try:
                 await self._speak_trilingual_open(viewer_name)
-                if not self._can_speak():
-                    logger.info("[%s] on_enter stopped — viewer left during intro", self._session_type)
+                if self._opening_cut or not self._can_speak():
+                    logger.info(
+                        "[%s] on_enter stopped — intro cut or viewer left",
+                        self._session_type,
+                    )
                     return
                 opened = await self._deliver_headline_via_tts(
                     is_first=True, viewer_name=viewer_name
                 )
+                if self._opening_cut or not self._can_speak():
+                    logger.info("[%s] on_enter stopped after first headline", self._session_type)
+                    return
                 if opened:
                     await self._deliver_headline_via_tts(is_first=False)
-                elif self._can_speak():
+                elif self._can_speak() and not self._opening_cut:
                     await self._say_language("en", "I'll bring you the latest as it comes in.")
             finally:
                 self._opening = False
+                # Cut only gates the intro — clear so idle bulletin can speak later.
+                self._opening_cut = False
         except RuntimeError as exc:
             if "closing" in str(exc).lower():
                 logger.info("[%s] on_enter stopped — session closing", self._session_type)
@@ -1020,6 +1103,16 @@ class Assistant(Agent):
         try:
             removed = self._participants.pop(participant.identity, participant.identity)
             logger.info("[%s] participant left: %s", self._session_type, removed)
+            humans = _human_participant_names(self._participants)
+            if not humans and not _is_avatar_identity(participant.identity):
+                # Last real viewer left — stop talking into an empty room.
+                self._viewer_gone = True
+                self._opening_cut = True
+                self._opening = False
+                try:
+                    self.session.interrupt(force=True)
+                except Exception:
+                    pass
         except Exception:
             logger.exception("_on_participant_disconnected error")
 
@@ -1100,14 +1193,15 @@ async def my_agent(ctx: JobContext) -> None:
             "interruption": {
                 "enabled": True,
                 "min_duration": 0.45,
-                "min_words": 1,
+                "min_words": 2,
                 # Simli avatar cannot pause mid-utterance; rely on session.interrupt().
                 "resume_false_interruption": not _use_simli,
                 "false_interruption_timeout": 1.0,
             },
             "endpointing": {
-                "min_delay": 0.15,
-                "max_delay": 0.85,
+                # Slightly longer window so "Firozpur… ki khabar" stays one turn.
+                "min_delay": 0.35,
+                "max_delay": 1.2,
             },
             "preemptive_generation": {
                 # Starts the LLM on the final STT text while the turn detector is
@@ -1315,11 +1409,11 @@ async def my_agent(ctx: JobContext) -> None:
         _bc["paused"] = False
         idx = int(_bc.get("resume_line_index", 0))
         _bc["resume_line_index"] = idx + 1
-        bridge = _CONVERSATION_RESUME_LINES[idx % len(_CONVERSATION_RESUME_LINES)]
-        logger.info("conversation idle — resuming bulletin with bridge")
+        code, bridge = _resume_bridge_for(agent._spoken_code(), idx)
+        logger.info("conversation idle — resuming bulletin with bridge (%s)", code)
         await _publish_mode("live")
         try:
-            await session.say(bridge, allow_interruptions=True)
+            await agent._say_language(code, bridge)
         except Exception:
             logger.exception("conversation resume bridge failed")
         await _continue_bulletin()
@@ -1406,9 +1500,18 @@ async def my_agent(ctx: JobContext) -> None:
             raw_transcript = (ev.transcript or "").strip()
             whisper_lang = getattr(ev, "language", None)
             agent._last_whisper_lang = whisper_lang if isinstance(whisper_lang, str) else None
-            if agent._opening or is_stt_garbage(raw_transcript):
-                logger.info("STT ignored (intro/garbage): %r", raw_transcript[:120])
+            if is_stt_garbage(raw_transcript):
+                logger.info("STT ignored (garbage): %r", raw_transcript[:120])
                 return
+            # Opening bulletin: ignore brief "thanks/ok", but accept real questions —
+            # previously ALL speech was dropped while _opening, so early asks vanished.
+            if agent._opening and is_intro_ack(raw_transcript):
+                logger.info("STT ignored (intro ack): %r", raw_transcript[:120])
+                return
+            if agent._opening:
+                logger.info("viewer spoke during intro — cutting open for: %r", raw_transcript[:120])
+                agent._opening = False
+                agent._opening_cut = True
             text = _correct_place_transcript(raw_transcript, collapse=False)
             if text:
                 logger.info("mic STT final (whisper=%s): %r", whisper_lang, text[:120])
@@ -1420,16 +1523,12 @@ async def my_agent(ctx: JobContext) -> None:
                     sticky = news_query_for(place) or place
                     if sticky:
                         agent._preferred_location = sticky
-                asyncio.create_task(
-                    _warm_headline_cache(
-                        agent,
-                        agent._preferred_location or place or None,
-                    )
-                )
+                # Warm only on news asks — and AFTER turn completed applies language
+                # (STT-time warm raced en-US vs hi cache keys). Place sticky is enough here.
                 if not _bc["conversation_mode"]:
                     asyncio.create_task(_enter_conversation_mode())
                 try:
-                    # Real final transcript — hard-interrupt bulletin for the reply.
+                    # Real final transcript — hard-interrupt bulletin/intro for the reply.
                     session.interrupt(force=True)
                 except Exception:
                     logger.exception("session.interrupt failed on final STT")
@@ -1631,6 +1730,30 @@ async def my_agent(ctx: JobContext) -> None:
         await _publish_mode("conversation")
         _schedule_conversation_idle()
 
+    async def _recover_empty_reply() -> None:
+        """If the LLM finished thinking with nothing spoken, don't leave Simli mute."""
+        if (
+            not _bc["user_turn_active"]
+            or session.agent_state in ("speaking", "thinking")
+            or not ctx.room.isconnected()
+        ):
+            return
+        code = agent._spoken_code()
+        line = {
+            "hi": "\u091c\u0940, \u092e\u0941\u091d\u0947 \u092b\u093f\u0930 \u0938\u0947 \u092a\u0942\u091b\u0947\u0902 \u2014 \u092e\u0948\u0902 \u0938\u0941\u0928 \u0930\u0939\u0940 \u0939\u0942\u0901\u0964",
+            "pa": "\u0a1c\u0a40, \u0a2b\u0a3f\u0a30 \u0a24\u0a4b\u0a02 \u0a2a\u0a41\u0a71\u0a1b\u0a4b \u2014 \u0a2e\u0a48\u0a02 \u0a38\u0a41\u0a23 \u0a30\u0a39\u0a40 \u0a39\u0a3e\u0a02\u0964",
+            "en": "Sorry — say that again and I'll pick it right up.",
+        }.get(code, "Sorry — say that again and I'll pick it right up.")
+        logger.info("empty LLM reply recovery (%s)", code)
+        try:
+            await agent._say_language(code, line)
+        except Exception:
+            logger.exception("empty reply recovery failed")
+        _bc["agent_responding_to_user"] = False
+        _mark_conversation_mode()
+        await _publish_mode("conversation")
+        _schedule_conversation_idle()
+
     def _on_agent_state_changed(ev) -> None:
         try:
             if ev.new_state == "thinking" and _bc["paused"] and _bc["user_turn_active"]:
@@ -1656,6 +1779,14 @@ async def my_agent(ctx: JobContext) -> None:
                         logger.info("agent responding to viewer")
                     elif ev.new_state == "thinking":
                         logger.info("agent thinking — holding bulletin and nudge")
+            elif ev.old_state == "thinking" and ev.new_state in ("listening", "idle"):
+                # Thought finished with no TTS — recover instead of mute.
+                if (
+                    _bc["user_turn_active"]
+                    and _bc["agent_responding_to_user"]
+                    and not agent._filler_speaking
+                ):
+                    asyncio.create_task(_recover_empty_reply())
             elif ev.old_state == "speaking" and ev.new_state in ("listening", "idle"):
                 if agent._filler_speaking:
                     agent._filler_speaking = False
@@ -1797,7 +1928,8 @@ async def my_agent(ctx: JobContext) -> None:
                 await asyncio.sleep(warn_at)
                 if ctx.room.isconnected():
                     try:
-                        await session.say(_TRIAL_WARN_SAY, allow_interruptions=True)
+                        spoken = agent._spoken_code()
+                        await agent._say_language(spoken, _trial_line("warn", spoken))
                     except Exception:
                         pass
                 await asyncio.sleep(60)
@@ -1806,7 +1938,8 @@ async def my_agent(ctx: JobContext) -> None:
 
             if ctx.room.isconnected():
                 try:
-                    await session.say(_TRIAL_END_SAY, allow_interruptions=True)
+                    spoken = agent._spoken_code()
+                    await agent._say_language(spoken, _trial_line("end", spoken))
                     await asyncio.sleep(8)
                 except Exception:
                     pass

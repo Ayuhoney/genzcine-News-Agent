@@ -1,6 +1,7 @@
 from local_voice_ai.services.spoken_lang import (
     SARVAM_LANGS,
     detect_spoken_lang,
+    has_sarvam_script,
     is_language_switch_only,
     is_stt_garbage,
     language_bridge,
@@ -131,6 +132,20 @@ def test_is_news_ask() -> None:
     assert is_news_ask("Firozpur batao")  # place + verb counts
 
 
+def test_intro_ack_vs_real_question() -> None:
+    from local_voice_ai.services.spoken_lang import is_intro_ack, is_stt_garbage
+
+    assert is_intro_ack("Thank you.")
+    assert is_intro_ack("Thank you Nova")
+    assert is_intro_ack("Okay")
+    assert is_intro_ack("ok")
+    assert is_intro_ack("theek hai")
+    assert is_intro_ack("shukriya")
+    assert not is_intro_ack("Okay, tell me next question.")
+    assert not is_intro_ack("Tell me about Firozpur.")
+    assert not is_stt_garbage("Okay, tell me next question.")
+
+
 def test_language_bridge_covers_all_sarvam_langs() -> None:
     for code in SARVAM_LANGS:
         assert language_bridge(code), code
@@ -144,8 +159,11 @@ def test_thinking_filler_covers_all_sarvam_langs() -> None:
 
     for code in SARVAM_LANGS:
         assert thinking_filler(code), code
-    assert thinking_filler("hi").startswith("\u090f\u0915")
-    assert "second" in thinking_filler("en").lower() or "\u2026" in thinking_filler("en")
+    assert "\u091c\u0940" in thinking_filler("hi")
+    assert has_sarvam_script(thinking_filler("hi"), "hi")
+    assert "one moment please" in thinking_filler("en").lower()
+    assert "\u0a1c\u0a40" in thinking_filler("pa")
+    assert "\u099c\u09bf" in thinking_filler("bn")
 
 
 def test_tts_lang_script_is_strict() -> None:

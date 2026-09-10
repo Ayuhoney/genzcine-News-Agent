@@ -176,6 +176,27 @@ _STT_GARBAGE = re.compile(
     re.IGNORECASE,
 )
 
+# Short politeness during the opening bulletin — do not cut the intro for these.
+_INTRO_ACK = re.compile(
+    r"^(ok(ay)?|thanks?|thank you(\s+\w+)?|haan|han|hmm+|yes|yeah|ji|"
+    r"theek hai|thik hai|shukriya|dhanyavaad|"
+    r"ठीक( है)?|हाँ|धन्यवाद)[.!…]?$",
+    re.IGNORECASE,
+)
+
+
+def is_stt_garbage(text: str) -> bool:
+    """True when STT echoed the Whisper prompt or our own intro — not a real viewer line."""
+    raw = (text or "").strip()
+    if not raw:
+        return True
+    return bool(_STT_GARBAGE.search(raw))
+
+
+def is_intro_ack(text: str) -> bool:
+    """True for brief courtesy lines that should not abort the opening bulletin."""
+    return bool(_INTRO_ACK.match((text or "").strip()))
+
 _NEWS_NOUN = re.compile(
     r"news|headline|khabar|khabr|\u0916\u092c\u0930|\u0a16\u0a2c\u0a30|"
     r"bulletin|headlines|\u0938\u092e\u093e\u091a\u093e\u0930",
@@ -221,18 +242,19 @@ _LANG_BRIDGE = {
 }
 
 # Covers LLM + news-tool silence so the avatar does not look frozen.
+# Native-script hold lines (Latin-only hi/en fillers 422 on Indic Sarvam).
 _THINKING_FILLER = {
-    "en": "One second\u2026",
-    "hi": "\u090f\u0915 \u0938\u0947\u0915\u0902\u0921\u2026",
-    "pa": "\u0a07\u0a71\u0a15 \u0a38\u0a15\u0a3f\u0a70\u0a1f\u2026",
-    "bn": "\u098f\u0995 \u09b8\u09c7\u0995\u09c7\u09a8\u09cd\u09a1\u2026",
-    "ta": "\u0b92\u0bb0\u0bc1 \u0ba8\u0bca\u0b9f\u0bbf\u2026",
-    "te": "\u0c12\u0c15\u0c4d\u0c15 \u0c15\u0c4d\u0c37\u0c23\u0c02\u2026",
-    "kn": "\u0c92\u0c82\u0ca6\u0cc1 \u0c95\u0ccd\u0cb7\u0ca3\u2026",
-    "ml": "\u0d12\u0d30\u0d41 \u0d28\u0d3f\u0d2e\u0d3f\u0d37\u0d02\u2026",
-    "mr": "\u090f\u0915 \u0938\u0947\u0915\u0902\u0926\u2026",
-    "gu": "\u0a8f\u0a95 \u0ab8\u0ac7\u0a95\u0aa8\u0acd\u0aa1\u2026",
-    "od": "\u0b17\u0b4b\u0b1f\u0b3f\u0b0f \u0b38\u0b47\u0b15\u0b47\u0b23\u0b4d\u0b21\u2026",
+    "en": "Sure, one moment please\u2026 I\u2019m checking that now.",
+    "hi": "\u091c\u0940, \u090f\u0915 \u092a\u0932\u2026 \u092e\u0948\u0902 \u0905\u092d\u0940 \u0926\u0947\u0916\u0924\u0940 \u0939\u0942\u0901\u0964",
+    "pa": "\u0a1c\u0a40, \u0a07\u0a71\u0a15 \u0a2a\u0a32 \u0a2a\u0a32\u0a40\u0a1c\u0a3c\u2026 \u0a2e\u0a48\u0a02 \u0a39\u0a41\u0a23 \u0a1a\u0a48\u0a71\u0a15 \u0a15\u0a30\u0a26\u0a40 \u0a39\u0a3e\u0a02\u0964",
+    "bn": "\u099c\u09bf, \u098f\u0995\u099f\u09c1 \u09ae\u09c1\u09b9\u09c2\u09b0\u09cd\u09a4 \u09aa\u09cd\u09b2\u09bf\u099c\u2026 \u0986\u09ae\u09bf \u098f\u0996\u09a8 \u099a\u09c7\u0995 \u0995\u09b0\u099b\u09bf\u0964",
+    "ta": "\u0b9a\u0bb0\u0bbf, \u0b92\u0bb0\u0bc1 \u0ba8\u0bbf\u0bae\u0bbf\u0b9f\u0bae\u0bcd \u0baa\u0bcd\u0bb3\u0bc0\u0bb8\u0bcd\u2026 \u0ba8\u0bbe\u0ba9\u0bcd \u0b87\u0baa\u0bcd\u0baa\u0bcb \u0baa\u0bbe\u0bb0\u0bcd\u0b95\u0bcd\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bcd.",
+    "te": "\u0c38\u0c30\u0c47, \u0c12\u0c15 \u0c15\u0c4d\u0c37\u0c23\u0c02 \u0c2a\u0c4d\u0c32\u0c40\u0c1c\u0c4d\u2026 \u0c28\u0c47\u0c28\u0c41 \u0c07\u0c2a\u0c4d\u0c2a\u0c41\u0c21\u0c41 \u0c1a\u0c42\u0c38\u0c4d\u0c24\u0c41\u0c28\u0c4d\u0c28\u0c3e\u0c28\u0c41.",
+    "kn": "\u0cb8\u0cb0\u0cbf, \u0c92\u0c82\u0ca6\u0cc1 \u0c95\u0ccd\u0cb7\u0ca3 \u0caa\u0ccd\u0cb2\u0cc0\u0c9c\u0ccd\u2026 \u0ca8\u0cbe\u0ca8\u0cc1 \u0c88\u0c97 \u0ca8\u0ccb\u0ca1\u0cc1\u0ca4\u0ccd\u0ca4\u0cbf\u0ca6\u0ccd\u0ca6\u0cc7\u0ca8\u0cc6.",
+    "ml": "\u0d36\u0d30\u0d3f, \u0d12\u0d30\u0d41 \u0d28\u0d3f\u0d2e\u0d3f\u0d37\u0d02 \u0d2a\u0d4d\u0d32\u0d40\u0d38\u0d4d\u2026 \u0d1e\u0d3e\u0d28\u0d4d\u200d \u0d07\u0d2a\u0d4d\u0d2a\u0d4b\u0d7e \u0d28\u0d4b\u0d15\u0d4d\u0d15\u0d3e\u0d02.",
+    "mr": "\u091c\u0940, \u090f\u0915 \u0915\u094d\u0937\u0923\u2026 \u092e\u0940 \u0906\u0924\u093e \u0924\u092a\u093e\u0938\u0924\u0947.",
+    "gu": "\u0a9c\u0ac0, \u0a8f\u0a95 \u0a95\u0acd\u0ab7\u0aa3 \u0aaa\u0acd\u0ab2\u0ac0\u0a9d\u2026 \u0ab9\u0ac1\u0a82 \u0ab9\u0aae\u0aa3\u0abe\u0a82 \u0a9a\u0ac7\u0a95 \u0a95\u0ab0\u0ac1\u0a82 \u0a9b\u0ac1\u0a82.",
+    "od": "\u0b1c\u0b3f, \u0b17\u0b4b\u0b1f\u0b3f\u0b0f \u0b15\u0b4d\u0b37\u0b23 \u0b2a\u0b4d\u0b32\u0b3f\u0b1c\u0b4d\u2026 \u0b2e\u0b41\u0b01 \u0b0f\u0b2c\u0b47 \u0b26\u0b47\u0b16\u0b41\u0b1b\u0b3f\u0964",
 }
 
 # Native glue when Bulbul 422s on Latin-only text in an Indic session.
@@ -261,14 +283,6 @@ _SARVAM_SCRIPT = {
     "kn": _KANNADA,
     "ml": _MALAYALAM,
 }
-
-
-def is_stt_garbage(text: str) -> bool:
-    """True when STT echoed the Whisper prompt or our own intro — not a real viewer line."""
-    raw = (text or "").strip()
-    if not raw:
-        return True
-    return bool(_STT_GARBAGE.search(raw))
 
 
 def language_bridge(code: str) -> str:
