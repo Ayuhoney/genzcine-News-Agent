@@ -112,8 +112,8 @@ async def test_real_user_session_firozpur_hindi_then_followups(viewer: Assistant
         # Tool path: topic=cricket should not clear Firozpur.
         out = await viewer.get_latest_news(ctx, topic="cricket")
     assert viewer._preferred_location == sticky
-    assert "Headlines:" in out
-    assert "Speak only the first headline" in out
+    assert "Stories:" in out
+    assert "Read the first story fully" in out
 
     # Turn 4 — language switch only (no news) → bridge, StopResponse, no filler-as-news.
     with (
@@ -183,6 +183,7 @@ def test_real_user_headline_sounds_natural_in_hindi_session() -> None:
     bridge, body = _headline_spoken_parts(article, is_first=True, language="hi")
     assert "\u0916\u092c\u0930" in bridge or "\u092c\u0921\u093c\u0940" in bridge
     assert "Markets rally" in body
+    assert "Stocks rose after cooler numbers" in body
     assert "Markets rally" not in bridge
 
 

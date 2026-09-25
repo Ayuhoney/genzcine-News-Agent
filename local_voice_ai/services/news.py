@@ -439,9 +439,25 @@ def _query_aliases(query: str) -> tuple[str, ...]:
     return aliases_for(query)
 
 
-def _mentions_query(article: dict[str, Any], query: str) -> bool:
-    blob = f"{article.get('title') or ''} {article.get('description') or ''}".lower()
-    return any(alias in blob for alias in _query_aliases(query) if alias)
+def _alias_in_text(alias: str, text: str) -> bool:
+    """Whole-word match. 'goa' must not hit 'goal', and 'punjab' must not hit 'punjabi'."""
+    alias = (alias or "").strip().lower()
+    if len(alias) < 3 or not text:
+        return False
+    return re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", text) is not None
+
+
+def _mentions_query(
+    article: dict[str, Any],
+    query: str,
+    *,
+    title_only: bool = False,
+) -> bool:
+    parts = [str(article.get("title") or "")]
+    if not title_only:
+        parts.append(str(article.get("description") or ""))
+    blob = " ".join(parts).lower()
+    return any(_alias_in_text(alias, blob) for alias in _query_aliases(query))
 
 
 def _is_preferred_paper(article: dict[str, Any]) -> bool:
@@ -669,8 +685,10 @@ async def _fetch_published_news(
     reporters = [a for group in buckets for a in group if a.get("provider") == "community"]
     app_local = [a for group in buckets for a in group if a.get("provider") != "community"]
     if city:
-        matched_reporters = [a for a in reporters if _mentions_query(a, city)]
-        matched_local = [a for a in app_local if _mentions_query(a, city)]
+        # Title must name the place. A promo body that only says
+        # "studio in Mohali" or "Punjabi web series" is not local news.
+        matched_reporters = [a for a in reporters if _mentions_query(a, city, title_only=True)]
+        matched_local = [a for a in app_local if _mentions_query(a, city, title_only=True)]
         merged = _merge_articles(matched_reporters, matched_local, limit=max(limit * 2, 8))
     else:
         merged = _merge_articles(reporters[:4], app_local, limit=max(limit * 2, 8))
@@ -776,10 +794,10 @@ async def _fetch_latest_news_uncached(
     global_wire = [a for a in global_wire if not _is_junk_title(str(a.get("title") or ""))]
     if city:
         official = [a for a in official if _mentions_query(a, city)]
-        matched_reporters = [a for a in reporters if _mentions_query(a, city)]
-        matched_local = [a for a in app_local if _mentions_query(a, city)]
-        reporters = matched_reporters or reporters[:2]
-        app_local = matched_local or app_local[:2]
+        # Unmatched GenzCine/community posts (promos, other cities) must not
+        # lead a city bulletin. RSS still covers the place when nothing matches.
+        reporters = [a for a in reporters if _mentions_query(a, city, title_only=True)]
+        app_local = [a for a in app_local if _mentions_query(a, city, title_only=True)]
     rss = _prefer_indian_papers(rss)
     official = _prefer_indian_papers(official)
     global_wire = _prefer_indian_papers(global_wire)

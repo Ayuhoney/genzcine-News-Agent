@@ -366,7 +366,8 @@ def extract_place(text: str) -> str | None:
         return exact
     hits: list[str] = []
     for alias, display in _DISPLAY.items():
-        if len(alias) < 4:
+        # 3-letter places (Goa, Una, Diu, Leh, NCR) still need a whole-word match.
+        if len(alias) < 3:
             continue
         if re.search(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", key):
             hits.append(display)

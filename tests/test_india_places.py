@@ -64,6 +64,11 @@ def test_spoken_place_names_stay_canonical():
     assert _correct_place_transcript("news from Firozpur city") == "Firozpur"
     assert _correct_place_transcript("Firozabad") == "Firozabad"
     assert _correct_place_transcript("national") == "national"
+    assert extract_place("tell me Goa local news") == "Goa"
+    assert extract_place("Una ki khabar") == "Una"
+    assert extract_place("news from Diu") == "Diu"
+    assert extract_place("Leh weather update") == "Leh"
+    assert news_query_for("Goa") == "Goa"
     assert _correct_place_transcript("all India") == "national"
 
 

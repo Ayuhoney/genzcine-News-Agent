@@ -31,6 +31,7 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from .services.agent_errors import classify_agent_error
 from .services.india_places import all_place_names, canonical_place, extract_place, news_query_for
 from .services.news import fetch_latest_news
+from .services.sarvam_stt import SarvamSTT, sarvam_stt_model
 from .services.sarvam_tts import LanguageRoutedTTS, build_language_router
 from .services.spoken_lang import (
     SARVAM_LANGS,
@@ -58,19 +59,9 @@ LLM_BASE_URL = os.getenv("LLAMA_BASE_URL", "https://api.groq.com/openai/v1")
 LLM_MODEL    = os.getenv("LLAMA_MODEL",    "llama-3.1-8b-instant")
 LLM_API_KEY  = os.getenv("LLAMA_API_KEY",  "")
 
-# STT
-STT_BASE_URL = os.getenv("STT_BASE_URL", "https://api.groq.com/openai/v1")
-STT_MODEL    = os.getenv("STT_MODEL",    "whisper-large-v3")
-STT_API_KEY  = os.getenv("STT_API_KEY",  "")
-# Whisper maps Indian city names to English lookalikes ("Firozpur" → "Frostburt").
-# Keep this free of switch phrases — Whisper will otherwise transcribe the prompt.
-_STT_PROMPT = (
-    "Indian news conversation in English, Hindi, Punjabi, Bengali, Tamil, Telugu, "
-    "Kannada, Malayalam, Marathi, Gujarati, or Odia. "
-    "Place names: Delhi, Mumbai, Kolkata, Chennai, Bengaluru, Hyderabad, Pune, "
-    "Ahmedabad, Jaipur, Lucknow, Patna, Bhopal, Chandigarh, Punjab, Kerala, "
-    "Tamil Nadu, Firozpur, Mohali."
-)
+# STT — Sarvam Saaras. A leftover Whisper model name in the env must not win.
+STT_MODEL = sarvam_stt_model()
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 _PLACE_ALIASES = {
     "firozpur": "Firozpur",
     "ferozepur": "Firozpur",
@@ -376,9 +367,11 @@ def _pause_llm(seconds: float) -> None:
     logger.info("LLM cooldown %.0fs — skip generate_reply until it expires", wait)
 
 _BASE_INSTRUCTIONS = """
-You are {anchor_name}, GenzCine news anchor (Mohali, genzcine.com). Voice only — ONE short sentence, two max.
+You are {anchor_name}, GenzCine news anchor (Mohali, genzcine.com). Voice only.
 Opening already played; do not greet again or ask their city.
-Call get_latest_news before any current news; never invent. Speak 1 top headline from the tool result, then stop.
+The live bulletin already reads full stories one after another. Do not restart that bulletin yourself.
+If the viewer chats, answer naturally in a few sentences, then stop so the bulletin can resume.
+If they ask for news, call get_latest_news first and never invent. Read the first story fully — what happened, not only the title — in several sentences, then stop.
 play_news_video only if they ask for a clip.
 Understand English and Indian languages (Hindi, Punjabi, Bengali, Tamil, Telugu, Kannada, Malayalam, Marathi, Gujarati, Odia) including Hinglish.
 City names in any script are places, not language locks. Reply in the active session language's native script.
@@ -433,7 +426,7 @@ _BUSY_FALLBACK = (
 )
 
 
-def _trim_description(text: str, *, limit: int = 100) -> str:
+def _trim_description(text: str, *, limit: int = 520) -> str:
     clean = (text or "").strip()
     if len(clean) <= limit:
         return clean
@@ -505,14 +498,16 @@ def _headline_spoken_parts(
     index: int = 0,
     language: str = "en-US",
 ) -> tuple[str, str]:
-    """Native bridge + Latin body so Indic TTS does not mangling English titles."""
+    """Native bridge + fuller story body (title, source, and the write-up)."""
     title = str(article.get("title", "")).strip()
     desc = _trim_description(str(article.get("description", "")))
+    source = str(article.get("source") or "").strip()
     if article.get("provider") == "community":
         title = f"From a GenzCine reporter: {title}"
     elif article.get("provider") == "genzcine":
         title = f"From GenzCine local: {title}"
-    body = f"{title}. {desc}".strip() if desc else f"{title}."
+    lead = f"This is from {source}. " if source else ""
+    body = f"{lead}{title}. {desc}".strip() if desc else f"{lead}{title}."
     if language == "hi":
         bridge = "पहली बड़ी खबर।" if is_first else _HEADLINE_BRIDGES_HI[index % len(_HEADLINE_BRIDGES_HI)]
         return bridge.strip(), body
@@ -805,7 +800,7 @@ class Assistant(Agent):
         is_first: bool = False,
         viewer_name: str | None = None,
     ) -> bool:
-        """Speak the next headline via TTS only — no LLM call (saves tokens)."""
+        """Speak the next full story via TTS only — bulletin loops without the LLM."""
         if self._opening_cut or not self._can_speak():
             return False
         if (
@@ -959,8 +954,13 @@ class Assistant(Agent):
                 tag = " [GenzCine]"
             elif a.get("provider") == "genzcine":
                 tag = " [local]"
-            lines.append(f"- {a['title']} ({a['source']}){tag}")
-        return "Headlines:\n" + "\n".join(lines) + "\nSpeak only the first headline in one short sentence."
+            detail = _trim_description(str(a.get("description") or ""), limit=400)
+            extra = f" — {detail}" if detail else ""
+            lines.append(f"- {a['title']} ({a['source']}){tag}{extra}")
+        return (
+            "Stories:\n" + "\n".join(lines)
+            + "\nRead the first story fully in several sentences. Do not stop after the title."
+        )
 
     @function_tool
     async def play_news_video(self, context: RunContext, topic: str) -> str:
@@ -1137,7 +1137,7 @@ async def my_agent(ctx: JobContext) -> None:
     session_type = "group" if ctx.room.name.startswith("group_room_") else "individual"
 
     logger.info(
-        "agent session: type=%s stt=%s llm=%s tts=sarvam-bulbul",
+        "agent session: type=%s stt=sarvam:%s llm=%s tts=sarvam-bulbul",
         session_type, STT_MODEL, LLM_MODEL,
     )
 
@@ -1173,13 +1173,7 @@ async def my_agent(ctx: JobContext) -> None:
     streamed_tts, tts_router = _build_tts(voice)
 
     session = AgentSession(
-        stt=openai.STT(
-            base_url=STT_BASE_URL,
-            model=STT_MODEL,
-            api_key=STT_API_KEY,
-            detect_language=True,
-            prompt=_STT_PROMPT,
-        ),
+        stt=SarvamSTT(api_key=SARVAM_API_KEY, model=STT_MODEL),
         llm=openai.LLM(
             base_url=LLM_BASE_URL,
             model=LLM_MODEL,
@@ -1204,11 +1198,11 @@ async def my_agent(ctx: JobContext) -> None:
                 "max_delay": 1.2,
             },
             "preemptive_generation": {
-                # Starts the LLM on the final STT text while the turn detector is
-                # still deciding — saves the 0.2-1.2s endpointing wait. A wasted
-                # call is ~₹0.03 on Sarvam, but on Groq's free tier it is a third
-                # of the per-minute token budget, so keep it off there.
-                "enabled": not _LLM_IS_GROQ,
+                # Off: on_user_turn_completed updates language/tools/transcript and
+                # LiveKit then invalidates the preempt — Sarvam tool-calls flicker
+                # thinking→listening (content=null) and we used to "recover" with
+                # "ask again" instead of reading the headline. Fillers cover the wait.
+                "enabled": False,
                 "preemptive_tts": False,
             },
         },
@@ -1332,6 +1326,7 @@ async def my_agent(ctx: JobContext) -> None:
         "reply_nudge_task": None,
         "conversation_idle_task": None,
         "thinking_filler_task": None,
+        "empty_reply_task": None,
         "failures": 0,
         "resume_line_index": 0,
     }
@@ -1609,8 +1604,8 @@ async def my_agent(ctx: JobContext) -> None:
     )
 
     # ── Continuous broadcast auto-continue ────────────────────────────────────
-    # Headlines run back-to-back. When the viewer speaks, pause the bulletin,
-    # let STT + LLM answer, then resume headlines once the reply finishes.
+    # Full stories run back-to-back. Viewer speech pauses the bulletin for a
+    # conversation; after CONVERSATION_IDLE_SECONDS of quiet, stories resume.
     async def _continue_bulletin(*, delay: float = HEADLINE_CONTINUE_SECONDS) -> None:
         task = _bc.get("continue_task")
         if task and not task.done():
@@ -1731,13 +1726,52 @@ async def my_agent(ctx: JobContext) -> None:
         _schedule_conversation_idle()
 
     async def _recover_empty_reply() -> None:
-        """If the LLM finished thinking with nothing spoken, don't leave Simli mute."""
+        """If the LLM finished thinking with nothing spoken, don't leave Simli mute.
+
+        Sarvam often returns tool_calls with content=null first — LiveKit can briefly
+        flicker thinking→listening mid-tool. Wait before treating that as failure.
+        On a news ask, prefer speaking a cached headline over "say that again".
+        """
+        try:
+            await asyncio.sleep(1.6)
+        except asyncio.CancelledError:
+            return
         if (
             not _bc["user_turn_active"]
             or session.agent_state in ("speaking", "thinking")
             or not ctx.room.isconnected()
+            or agent._filler_speaking
         ):
             return
+        # Real assistant text already landed — nothing to recover.
+        try:
+            last = next(
+                (
+                    m
+                    for m in reversed(session.history.items)
+                    if getattr(m, "role", None) == "assistant"
+                ),
+                None,
+            )
+            if last and (getattr(last, "text_content", None) or "").strip():
+                return
+        except Exception:
+            pass
+
+        # News path: speak a real headline instead of an apology loop.
+        if agent._silence_filler_spoken:
+            logger.info("empty LLM after news/lang cover — TTS headline fallback")
+            try:
+                ok = await agent._deliver_headline_via_tts(is_first=True)
+                if ok:
+                    _bc["agent_responding_to_user"] = False
+                    _mark_conversation_mode()
+                    await _publish_mode("conversation")
+                    _schedule_conversation_idle()
+                    return
+            except Exception:
+                logger.exception("headline fallback after empty LLM failed")
+
         code = agent._spoken_code()
         line = {
             "hi": "\u091c\u0940, \u092e\u0941\u091d\u0947 \u092b\u093f\u0930 \u0938\u0947 \u092a\u0942\u091b\u0947\u0902 \u2014 \u092e\u0948\u0902 \u0938\u0941\u0928 \u0930\u0939\u0940 \u0939\u0942\u0901\u0964",
@@ -1754,13 +1788,21 @@ async def my_agent(ctx: JobContext) -> None:
         await _publish_mode("conversation")
         _schedule_conversation_idle()
 
+    def _cancel_empty_reply_recovery() -> None:
+        task = _bc.get("empty_reply_task")
+        if task and not task.done():
+            task.cancel()
+        _bc["empty_reply_task"] = None
+
     def _on_agent_state_changed(ev) -> None:
         try:
             if ev.new_state == "thinking" and _bc["paused"] and _bc["user_turn_active"]:
                 # Do NOT clear _filler_speaking here — filler audio may still be playing.
+                _cancel_empty_reply_recovery()
                 _schedule_thinking_filler()
             elif ev.new_state == "speaking":
                 _cancel_thinking_filler()
+                _cancel_empty_reply_recovery()
                 if agent._pending_lang_commit:
                     agent._pending_lang_commit = False
                     asyncio.create_task(agent._commit_language_instructions())
@@ -1781,12 +1823,14 @@ async def my_agent(ctx: JobContext) -> None:
                         logger.info("agent thinking — holding bulletin and nudge")
             elif ev.old_state == "thinking" and ev.new_state in ("listening", "idle"):
                 # Thought finished with no TTS — recover instead of mute.
+                # Debounced: tool-call turns flicker through this state with content=null.
                 if (
                     _bc["user_turn_active"]
                     and _bc["agent_responding_to_user"]
                     and not agent._filler_speaking
                 ):
-                    asyncio.create_task(_recover_empty_reply())
+                    _cancel_empty_reply_recovery()
+                    _bc["empty_reply_task"] = asyncio.create_task(_recover_empty_reply())
             elif ev.old_state == "speaking" and ev.new_state in ("listening", "idle"):
                 if agent._filler_speaking:
                     agent._filler_speaking = False

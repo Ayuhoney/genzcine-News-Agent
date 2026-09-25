@@ -153,6 +153,63 @@ async def test_city_ask_keeps_query_scoped_rss_when_mention_misses(monkeypatch):
     assert "Punjab" in articles[0]["title"]
 
 
+@pytest.mark.asyncio
+async def test_city_ask_does_not_lead_with_unrelated_genzcine(monkeypatch):
+    """A promo that never names the city must not be spoken before local RSS."""
+    _HEADLINE_CACHE.clear()
+
+    async def fake_published(*_args, **_kwargs):
+        return [
+            {
+                "title": "GenZCine 10-Day Talent Challenge",
+                "description": "Studio in Mohali, Punjab. Appear in a Punjabi web series.",
+                "link": "",
+                "source": "GenzCine",
+                "pubDate": "",
+                "provider": "community",
+            },
+            {
+                "title": "Chelsea win against Austria Vienna",
+                "description": "Kaptein scores an early goal. Four goals in the match.",
+                "link": "",
+                "source": "GenzCine local",
+                "pubDate": "",
+                "provider": "genzcine",
+            },
+        ]
+
+    async def fake_rss(query, _language, limit):
+        if query == "Goa":
+            return [
+                {
+                    "title": "Goa CEO reviews voter list cases",
+                    "description": "Panaji office processed 97 cases.",
+                    "link": "https://example.com/goa",
+                    "source": "The Indian Express",
+                    "pubDate": "2026-09-25T10:00:00Z",
+                    "provider": "google_rss",
+                }
+            ][:limit]
+        return []
+
+    monkeypatch.setattr("local_voice_ai.services.news._fetch_published_news", fake_published)
+    monkeypatch.setattr("local_voice_ai.services.news._fetch_google_rss", fake_rss)
+    monkeypatch.setattr(
+        "local_voice_ai.services.news._fetch_official_paper_rss",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no official")),
+    )
+    monkeypatch.setattr(
+        "local_voice_ai.services.news._fetch_global_newsdata",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no global")),
+    )
+
+    articles = await fetch_latest_news(query="Goa", language="en-US", limit=3)
+    assert articles
+    assert "Goa" in articles[0]["title"]
+    assert all("Talent Challenge" not in a["title"] for a in articles)
+    assert all("Chelsea" not in a["title"] for a in articles)
+
+
 def test_preferred_indian_papers_detected_and_boosted():
     query = _preferred_paper_query("Firozpur")
     assert "Dainik Bhaskar" in query
@@ -201,6 +258,30 @@ def test_junk_title_and_query_match():
     assert not _is_junk_title("Firozpur police arrest two alleged extortionists")
     assert _mentions_query({"title": "Shootout in Ferozepur", "description": ""}, "Firozpur")
     assert not _mentions_query({"title": "Union Cabinet reshuffle", "description": ""}, "Firozpur")
+    # Short place names must not match inside a longer English word.
+    assert not _mentions_query(
+        {"title": "Chelsea early goal", "description": "Kaptein scored four goals."},
+        "Goa",
+    )
+    assert not _mentions_query(
+        {
+            "title": "10-Day Talent Challenge",
+            "description": "Appear in Punjabi web series. Studio in Mohali, Punjab.",
+        },
+        "Punjab",
+        title_only=True,
+    )
+    assert not _mentions_query(
+        {
+            "title": "Story for genzcine",
+            "description": "The challenge runs at GenzCine studio in Mohali, Punjab.",
+        },
+        "Mohali",
+        title_only=True,
+    )
+    assert _mentions_query({"title": "SC seeks Goa response", "description": ""}, "Goa")
+    assert _mentions_query({"title": "AAP government in Punjab failed", "description": ""}, "Punjab")
+    assert _mentions_query({"title": "Red ball fixture moved to Mohali", "description": ""}, "Mohali")
 
 
 def test_merge_articles_community_first():
