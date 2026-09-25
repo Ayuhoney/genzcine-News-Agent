@@ -166,6 +166,25 @@ def test_thinking_filler_covers_all_sarvam_langs() -> None:
     assert "\u099c\u09bf" in thinking_filler("bn")
 
 
+def test_brand_is_spoken_as_gen_z_not_the_raw_word() -> None:
+    from local_voice_ai.agent import _trial_line, _tv_open_segments
+    from local_voice_ai.services.spoken_lang import brand_spoken, speakify_brand
+
+    assert brand_spoken("en") == "Gen Zee Cine"
+    assert brand_spoken("hi") == "जेन ज़ी सिने"
+    assert "ਜੇਨ" in brand_spoken("pa")
+    assert "GenzCine" not in brand_spoken("ta")
+    spoken = speakify_brand("You're watching GenzCine. Visit genzcine.com.", "en")
+    assert "GenzCine" not in spoken
+    assert "Gen Zee Cine" in spoken
+    assert "genzcine.com" not in spoken.lower()
+    line = _tv_open_segments("NOVA", "Aman")[-1][1]
+    assert "Gen Zee Cine" in line
+    assert "GenzCine" not in line
+    assert "GenzCine" not in _trial_line("warn", "en")
+    assert "GenzCine" not in _trial_line("warn", "hi")
+
+
 def test_tts_lang_script_is_strict() -> None:
     assert tts_lang_for_text("\u0928\u092e\u0938\u094d\u0924\u0947", "en") == "hi"
     assert tts_lang_for_text("\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32", "en") == "pa"

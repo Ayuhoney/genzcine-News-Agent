@@ -169,10 +169,44 @@ _HINGLISH = re.compile(
     re.IGNORECASE,
 )
 
+# "GenzCine" as one word is spoken as "Jain Cine".
+# The name is gen z cine — जेन ज़ी सिने.
+_BRAND_SPOKEN = {
+    "en": "Gen Zee Cine",
+    "hi": "जेन ज़ी सिने",
+    "mr": "जेन ज़ी सिने",
+    "pa": "ਜੇਨ ਜ਼ੀ ਸਿਨੇ",
+    "bn": "Gen Zee Cine",
+    "ta": "ஜென் சீ சினே",
+    "te": "జెన్ జీ సినే",
+    "kn": "ಜೆನ್ ಜೀ ಸಿನೆ",
+    "ml": "ജെൻ സീ സിനേ",
+    "gu": "જેન ઝી સિને",
+    "od": "ଜେନ ଜୀ ସିନେ",
+}
+_BRAND_WORD = re.compile(r"genzcine(?:\s+dot\s+com|\.com)?|genz\s*cine", re.IGNORECASE)
+
+
+def brand_spoken(language: str | None) -> str:
+    """TTS spelling of the platform name. Do not pass the raw word GenzCine."""
+    code = (language or "en").split("-")[0].lower()
+    if code == "or":
+        code = "od"
+    return _BRAND_SPOKEN.get(code, _BRAND_SPOKEN["en"])
+
+
+def speakify_brand(text: str, language: str | None = "en") -> str:
+    """Rewrite a spoken line so Bulbul says gen z cine, not Jain Cine."""
+    if not text:
+        return text
+    return _BRAND_WORD.sub(brand_spoken(language), text)
+
+
 _STT_GARBAGE = re.compile(
     r"transcribe in|speaker is punjabi|label language|ddevanagari|"
     r"thank you for watching|satsang with mooji|"
-    r"you're watching genzcine|speak any language, i.ll follow",
+    r"you're watching genzcine|you're watching gen zee cine|gen z cine|"
+    r"speak any language, i.ll follow",
     re.IGNORECASE,
 )
 

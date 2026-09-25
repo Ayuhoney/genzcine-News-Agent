@@ -38,12 +38,14 @@ from .services.spoken_lang import (
     SESSION_TO_SPOKEN,
     SPOKEN_TO_SESSION,
     detect_spoken_lang,
+    brand_spoken,
     has_sarvam_script,
     is_intro_ack,
     is_language_switch_only,
     is_news_ask,
     is_stt_garbage,
     language_bridge,
+    speakify_brand,
     thinking_filler,
 )
 from .services.studio_events import STUDIO_TOPIC, headline_article, publish_studio_event
@@ -299,32 +301,35 @@ _CONVERSATION_RESUME = {
     ),
 }
 
+_BRAND_EN = brand_spoken("en")
+_BRAND_HI = brand_spoken("hi")
+_BRAND_PA = brand_spoken("pa")
 _TRIAL_WARN_SAY = {
     "en": (
-        "Just a heads up — about one minute left in your free GenzCine trial. "
-        "Visit genzcine dot com for unlimited live news with me."
+        f"Just a heads up — about one minute left in your free {_BRAND_EN} trial. "
+        f"Visit the {_BRAND_EN} website for unlimited live news with me."
     ),
     "hi": (
-        "\u091c\u0940, \u090f\u0915 \u092c\u093e\u0924 \u2014 \u0906\u092a\u0915\u0947 free GenzCine trial \u092e\u0947\u0902 \u0932\u0917\u092d\u0917 \u090f\u0915 \u092e\u093f\u0928\u091f \u092c\u091a\u093e \u0939\u0948\u0964 "
-        "\u0905\u0938\u0940\u092e\u093f\u0924 \u0928\u094d\u092f\u0942\u091c\u093c \u0915\u0947 \u0932\u093f\u090f genzcine dot com \u0926\u0947\u0916\u0947\u0902\u0964"
+        f"जी, एक बात — आपके free {_BRAND_HI} trial में लगभग एक मिनट बचा है। "
+        f"असीमित न्यूज़ के लिए {_BRAND_HI} की वेबसाइट देखें।"
     ),
     "pa": (
-        "\u0a1c\u0a40, \u0a07\u0a71\u0a15 \u0a17\u0a71\u0a32 \u2014 \u0a24\u0a41\u0a39\u0a3e\u0a21\u0a47 free GenzCine trial \u0a35\u0a3f\u0a71\u0a1a \u0a32\u0a17\u0a2d\u0a17 \u0a07\u0a71\u0a15 \u0a2e\u0a3f\u0a70\u0a1f \u0a2c\u0a1a\u0a3f\u0a06 \u0a39\u0a48\u0964 "
-        "\u0a05\u0a38\u0a40\u0a2e\u0a3f\u0a24 \u0a16\u0a3c\u0a2c\u0a30\u0a3e\u0a02 \u0a32\u0a08 genzcine dot com \u0a35\u0a47\u0a16\u0a4b\u0964"
+        f"ਜੀ, ਇੱਕ ਗੱਲ — ਤੁਹਾਡੇ free {_BRAND_PA} trial ਵਿੱਚ ਲਗਭਗ ਇੱਕ ਮਿੰਟ ਬਚਿਆ ਹੈ। "
+        f"ਅਸੀਮਿਤ ਖ਼ਬਰਾਂ ਲਈ {_BRAND_PA} ਦੀ ਵੈੱਬਸਾਈਟ ਵੇਖੋ।"
     ),
 }
 _TRIAL_END_SAY = {
     "en": (
-        "Your free trial has ended. Thanks for watching today's news with GenzCine! "
-        "Unlock unlimited access at genzcine dot com. Goodbye for now!"
+        f"Your free trial has ended. Thanks for watching today's news with {_BRAND_EN}! "
+        f"Unlock unlimited access at the {_BRAND_EN} website. Goodbye for now!"
     ),
     "hi": (
-        "\u0906\u092a\u0915\u093e free trial \u0916\u0924\u094d\u092e \u0939\u094b \u0917\u092f\u093e\u0964 GenzCine \u0915\u0947 \u0938\u093e\u0925 \u0906\u091c \u0915\u0940 \u0916\u092c\u0930\u0947\u0902 \u0926\u0947\u0916\u0928\u0947 \u0915\u093e \u0927\u0928\u094d\u092f\u0935\u093e\u0926\u0964 "
-        "genzcine dot com \u092a\u0930 \u0905\u0938\u0940\u092e\u093f\u0924 \u0905\u0915\u094d\u0938\u0947\u0938 \u0916\u094b\u0932\u0947\u0902\u0964 \u092b\u093f\u0930 \u092e\u093f\u0932\u0924\u0947 \u0939\u0948\u0902!"
+        f"आपका free trial खत्म हो गया। {_BRAND_HI} के साथ आज की खबरें देखने का धन्यवाद। "
+        f"{_BRAND_HI} की वेबसाइट पर असीमित अक्सेस खोलें। फिर मिलते हैं!"
     ),
     "pa": (
-        "\u0a24\u0a41\u0a39\u0a3e\u0a21\u0a3e free trial \u0a16\u0a24\u0a2e \u0a39\u0a4b \u0a17\u0a3f\u0a06 \u0a39\u0a48\u0964 GenzCine \u0a28\u0a3e\u0a32 \u0a05\u0a71\u0a1c \u0a26\u0a40\u0a06\u0a02 \u0a16\u0a3c\u0a2c\u0a30\u0a3e\u0a02 \u0a35\u0a47\u0a16\u0a23 \u0a32\u0a08 \u0a27\u0a70\u0a28\u0a35\u0a3e\u0a26\u0964 "
-        "genzcine dot com \u0a24\u0a47 \u0a05\u0a38\u0a40\u0a2e\u0a3f\u0a24 \u0a05\u0a15\u0a38\u0a48\u0a71\u0a38 \u0a16\u0a4b\u0a32\u0a4d\u0a39\u0a4b\u0964 \u0a2b\u0a3f\u0a30 \u0a2e\u0a3f\u0a32\u0a26\u0a47 \u0a39\u0a3e\u0a02!"
+        f"ਤੁਹਾਡਾ free trial ਖਤਮ ਹੋ ਗਿਆ ਹੈ। {_BRAND_PA} ਨਾਲ ਅੱਜ ਦੀਆਂ ਖ਼ਬਰਾਂ ਵੇਖਣ ਲਈ ਧੰਨਵਾਦ। "
+        f"{_BRAND_PA} ਦੀ ਵੈੱਬਸਾਈਟ ਤੇ ਅਸੀਮਿਤ ਅਕਸੈੱਸ ਖੋਲ੍ਹੋ। ਫਿਰ ਮਿਲਦੇ ਹਾਂ!"
     ),
 }
 
@@ -367,7 +372,8 @@ def _pause_llm(seconds: float) -> None:
     logger.info("LLM cooldown %.0fs — skip generate_reply until it expires", wait)
 
 _BASE_INSTRUCTIONS = """
-You are {anchor_name}, GenzCine news anchor (Mohali, genzcine.com). Voice only.
+You are {anchor_name}, news anchor for this platform (Mohali). Voice only.
+The platform is GenzCine. In anything you speak, write the name exactly as "{brand}". Never write GenzCine, Genzcine, or Jain Cine.
 Opening already played; do not greet again or ask their city.
 The live bulletin already reads full stories one after another. Do not restart that bulletin yourself.
 If the viewer chats, answer naturally in a few sentences, then stop so the bulletin can resume.
@@ -382,21 +388,21 @@ No <think>, lists, or plan-narration.
 # code -> (display name, extra instruction for the LLM)
 _SCRIPT_REPLY = (
     "Write EVERY reply in {script}. Do not open with Hey, Hello, or English sentences. "
-    "Names like TINA and GenzCine may stay in English."
+    "Say this platform's name as {brand}. Never write GenzCine."
 )
 _LANGUAGES: dict[str, tuple[str, str]] = {
-    "en-US": ("English", "Use clear Indian English. Keep replies short."),
-    "en-GB": ("English", "Use clear Indian English. Keep replies short."),
-    "hi": ("Hindi", _SCRIPT_REPLY.format(script="Devanagari script")),
-    "pa": ("Punjabi", _SCRIPT_REPLY.format(script="Gurmukhi script")),
-    "bn": ("Bengali", _SCRIPT_REPLY.format(script="Bengali script")),
-    "ta": ("Tamil", _SCRIPT_REPLY.format(script="Tamil script")),
-    "te": ("Telugu", _SCRIPT_REPLY.format(script="Telugu script")),
-    "kn": ("Kannada", _SCRIPT_REPLY.format(script="Kannada script")),
-    "ml": ("Malayalam", _SCRIPT_REPLY.format(script="Malayalam script")),
-    "mr": ("Marathi", _SCRIPT_REPLY.format(script="Devanagari script (Marathi)")),
-    "gu": ("Gujarati", _SCRIPT_REPLY.format(script="Gujarati script")),
-    "od": ("Odia", _SCRIPT_REPLY.format(script="Odia script")),
+    "en-US": ("English", f"Use clear Indian English. Keep replies short. Say the platform name as {brand_spoken('en')}."),
+    "en-GB": ("English", f"Use clear Indian English. Keep replies short. Say the platform name as {brand_spoken('en')}."),
+    "hi": ("Hindi", _SCRIPT_REPLY.format(script="Devanagari script", brand=brand_spoken("hi"))),
+    "pa": ("Punjabi", _SCRIPT_REPLY.format(script="Gurmukhi script", brand=brand_spoken("pa"))),
+    "bn": ("Bengali", _SCRIPT_REPLY.format(script="Bengali script", brand=brand_spoken("bn"))),
+    "ta": ("Tamil", _SCRIPT_REPLY.format(script="Tamil script", brand=brand_spoken("ta"))),
+    "te": ("Telugu", _SCRIPT_REPLY.format(script="Telugu script", brand=brand_spoken("te"))),
+    "kn": ("Kannada", _SCRIPT_REPLY.format(script="Kannada script", brand=brand_spoken("kn"))),
+    "ml": ("Malayalam", _SCRIPT_REPLY.format(script="Malayalam script", brand=brand_spoken("ml"))),
+    "mr": ("Marathi", _SCRIPT_REPLY.format(script="Devanagari script (Marathi)", brand=brand_spoken("mr"))),
+    "gu": ("Gujarati", _SCRIPT_REPLY.format(script="Gujarati script", brand=brand_spoken("gu"))),
+    "od": ("Odia", _SCRIPT_REPLY.format(script="Odia script", brand=brand_spoken("od"))),
 }
 
 
@@ -445,7 +451,7 @@ def _tv_open_segments(anchor_name: str, viewer_name: str | None) -> list[tuple[s
     pa = "\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32 \u0a1c\u0a40\u0964"  # ਸਤ ਸ੍ਰੀ ਅਕਾਲ ਜੀ।
     welcome = f"Welcome, {viewer_name}." if viewer_name else "Welcome."
     en = (
-        f"{welcome} You're watching GenzCine — I'm {anchor_name}. "
+        f"{welcome} You're watching {brand_spoken('en')} — I'm {anchor_name}. "
         "Speak any Indian language or English. Here's today's bulletin."
     )
     return [("hi", hi), ("pa", pa), ("en", en)]
@@ -460,7 +466,7 @@ def _tv_open(anchor_name: str, viewer_name: str | None, language: str) -> str:
             else "\u0928\u092e\u0938\u094d\u0924\u0947\u0964"
         )
         return (
-            f"{namaste} \u0906\u092a \u0926\u0947\u0916 \u0930\u0939\u0947 \u0939\u0948\u0902 GenzCine\u0964 "
+            f"{namaste} आप देख रहे हैं {brand_spoken('hi')}। "
             f"\u092e\u0948\u0902 {anchor_name} \u0939\u0942\u0901, "
             "\u0906\u092a\u0915\u0940 \u0932\u093e\u0907\u0935 \u0928\u094d\u092f\u0942\u091c\u093c \u090f\u0902\u0915\u0930\u0964 "
             "\u0938\u0924 \u0936\u094d\u0930\u0940 \u0905\u0915\u093e\u0932\u0964 "
@@ -475,7 +481,7 @@ def _tv_open(anchor_name: str, viewer_name: str | None, language: str) -> str:
             else "\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32 \u0a1c\u0a40\u0964"
         )
         return (
-            f"{sat} \u0a24\u0a41\u0a38\u0a40\u0a02 \u0a35\u0a47\u0a16 \u0a30\u0a39\u0a47 \u0a39\u0a4b GenzCine\u0964 "
+            f"{sat} ਤੁਸੀਂ ਵੇਖ ਰਹੇ ਹੋ {brand_spoken('pa')}। "
             f"\u0a2e\u0a48\u0a02 {anchor_name} \u0a39\u0a3e\u0a02, "
             "\u0a24\u0a41\u0a39\u0a3e\u0a21\u0a40 \u0a32\u0a3e\u0a08\u0a35 \u0a28\u0a3f\u0a0a\u0a1c\u0a3c \u0a10\u0a02\u0a15\u0a30\u0964 "
             "\u0a28\u0a2e\u0a38\u0a24\u0a47\u0964 "
@@ -485,7 +491,7 @@ def _tv_open(anchor_name: str, viewer_name: str | None, language: str) -> str:
         )
     welcome = f"Welcome, {viewer_name}." if viewer_name else "Welcome."
     return (
-        f"You're watching GenzCine. I'm {anchor_name}, live from the newsroom. "
+        f"You're watching {brand_spoken('en')}. I'm {anchor_name}, live from the newsroom. "
         "Hindi, Punjabi, English — speak any language, I'll follow you. "
         f"{welcome} Here's today's bulletin."
     )
@@ -500,12 +506,15 @@ def _headline_spoken_parts(
 ) -> tuple[str, str]:
     """Native bridge + fuller story body (title, source, and the write-up)."""
     title = str(article.get("title", "")).strip()
-    desc = _trim_description(str(article.get("description", "")))
+    desc = speakify_brand(_trim_description(str(article.get("description", ""))), "en")
     source = str(article.get("source") or "").strip()
+    title = speakify_brand(title, "en")
+    source = speakify_brand(source, "en")
+    brand = brand_spoken("en")
     if article.get("provider") == "community":
-        title = f"From a GenzCine reporter: {title}"
+        title = f"From a {brand} reporter: {title}"
     elif article.get("provider") == "genzcine":
-        title = f"From GenzCine local: {title}"
+        title = f"From {brand} local: {title}"
     lead = f"This is from {source}. " if source else ""
     body = f"{lead}{title}. {desc}".strip() if desc else f"{lead}{title}."
     if language == "hi":
@@ -663,7 +672,7 @@ class Assistant(Agent):
 
     def _instructions_text(self) -> str:
         return (
-            _BASE_INSTRUCTIONS.format(anchor_name=self._anchor_name)
+            _BASE_INSTRUCTIONS.format(anchor_name=self._anchor_name, brand=brand_spoken("en"))
             + _language_addon(self._language)
             + (_GROUP_ADDON if self._session_type == "group" else "")
         )
@@ -951,12 +960,12 @@ class Assistant(Agent):
         for a in articles[:LLM_NEWS_LINES]:
             tag = ""
             if a.get("provider") == "community":
-                tag = " [GenzCine]"
+                tag = f" [{brand_spoken('en')}]"
             elif a.get("provider") == "genzcine":
                 tag = " [local]"
             detail = _trim_description(str(a.get("description") or ""), limit=400)
             extra = f" — {detail}" if detail else ""
-            lines.append(f"- {a['title']} ({a['source']}){tag}{extra}")
+            lines.append(speakify_brand(f"- {a['title']} ({a['source']}){tag}{extra}", "en"))
         return (
             "Stories:\n" + "\n".join(lines)
             + "\nRead the first story fully in several sentences. Do not stop after the title."
