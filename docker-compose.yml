@@ -11,6 +11,7 @@ services:
         LIVEKIT_IMAGE: ${LIVEKIT_IMAGE:-livekit/livekit-server:latest}
         PYTHON_BASE: ${PYTHON_BASE:-python:3.11-slim}
         TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
+    restart: unless-stopped
     env_file:
       - .env
     environment:
