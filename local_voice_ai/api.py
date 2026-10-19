@@ -16,7 +16,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from livekit import api as lk_api
 from livekit.protocol.room import RoomConfiguration
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -138,15 +138,18 @@ class _AccessLogMiddleware(BaseHTTPMiddleware):
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Any) -> Any:
         response = await call_next(request)
-        response.headers.update(
-            {
-                "X-Content-Type-Options": "nosniff",
-                "X-Frame-Options": "DENY",
-                "X-XSS-Protection": "1; mode=block",
-                "Referrer-Policy": "strict-origin-when-cross-origin",
-                "Permissions-Policy": "camera=(self), microphone=(self), geolocation=()",
-            }
-        )
+        is_yt_embed = request.url.path.startswith("/api/youtube/embed/")
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "X-XSS-Protection": "1; mode=block",
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+        }
+        if is_yt_embed:
+            headers["Permissions-Policy"] = "autoplay=*, encrypted-media=*, fullscreen=*, picture-in-picture=*"
+        else:
+            headers["X-Frame-Options"] = "DENY"
+            headers["Permissions-Policy"] = "camera=(self), microphone=(self), geolocation=()"
+        response.headers.update(headers)
         return response
 
 
@@ -646,6 +649,65 @@ def build_app(cfg: Config) -> FastAPI:
         return JSONResponse({"face_id": face_id_str})
 
     # ── Health ────────────────────────────────────────────────────────────────
+
+    # ── YouTube HTTPS Embed Bridge (fixes iOS custom scheme Referer rejection) ──
+    _YT_VID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
+
+    @app.get("/api/youtube/embed/{video_id}", response_class=HTMLResponse)
+    async def youtube_embed_bridge(video_id: str, request: Request) -> HTMLResponse:
+        vid = video_id.strip()
+        if not _YT_VID_RE.match(vid):
+            raise HTTPException(status_code=400, detail="Invalid video ID")
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "news.200.234.41.50.sslip.io"
+        origin = f"https://{host}"
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<style>
+  html, body {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }}
+  iframe {{ position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }}
+</style>
+</head>
+<body>
+<iframe
+  id="yt"
+  src="https://www.youtube.com/embed/{vid}?autoplay=1&amp;playsinline=1&amp;rel=0&amp;modestbranding=1&amp;controls=1&amp;fs=1&amp;enablejsapi=1&amp;origin={origin}"
+  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+  allowfullscreen
+  referrerpolicy="strict-origin-when-cross-origin"
+></iframe>
+<script>
+(function() {{
+  var f = document.getElementById('yt');
+  function sendToYt(msg) {{
+    try {{ f.contentWindow.postMessage(typeof msg === 'string' ? msg : JSON.stringify(msg), '*'); }} catch (e) {{}}
+  }}
+  f.addEventListener('load', function() {{
+    sendToYt({{ event: 'listening', id: 1, channel: 'widget' }});
+    sendToYt({{ event: 'command', func: 'playVideo', args: [] }});
+  }});
+  window.addEventListener('message', function(e) {{
+    if (!e.data) return;
+    if (e.source === f.contentWindow) {{
+      try {{ window.parent.postMessage(e.data, '*'); }} catch (err) {{}}
+      try {{
+        var d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+        if (d && d.event === 'onReady') {{
+          sendToYt({{ event: 'command', func: 'playVideo', args: [] }});
+        }}
+      }} catch (err) {{}}
+    }} else if (e.source === window.parent) {{
+      sendToYt(e.data);
+    }}
+  }});
+}})();
+</script>
+</body>
+</html>"""
+        return HTMLResponse(content=html)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

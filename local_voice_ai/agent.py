@@ -655,6 +655,8 @@ class Assistant(Agent):
         self._anchor_name = anchor_name
         self._language = language
         self._video_playing = False
+        self._last_video_start_at: float = 0.0
+        self._video_topic: str = ""
         self._last_headlines: list[dict] = []
         self._headline_index = 0
         self._preferred_location: str = ""  # set by user at session start
@@ -971,29 +973,58 @@ class Assistant(Agent):
             + "\nRead the first story fully in several sentences. Do not stop after the title."
         )
 
-    @function_tool
-    async def play_news_video(self, context: RunContext, topic: str) -> str:
-        """Play a YouTube clip on the viewer's screen. topic: what to search."""
+    def _resolve_video_topic(self, topic: str) -> str:
+        raw = (topic or "").strip()
+        lowered = raw.lower()
+        generic_phrases = {
+            "", "video", "play video", "show video", "news video", "clip",
+            "play the video", "show the video", "watch video", "video dikhao",
+            "video chala do", "video chalao", "iska video", "this story",
+            "current story", "news", "latest news", "breaking news",
+            "वीडियो", "वीडियो चलाओ", "वीडियो दिखाओ", "ਵੀਡੀਓ", "ਵੀਡੀਓ ਚਲਾਓ",
+        }
+        if lowered in generic_phrases or len(raw) < 3:
+            if self._last_headlines:
+                idx = max(0, self._headline_index - 1) % len(self._last_headlines)
+                title = str(self._last_headlines[idx].get("title") or "").strip()
+                if title:
+                    return title[:90]
+            if self._preferred_location:
+                return f"{self._preferred_location} latest news"
+            return "India breaking news"
+        return raw[:90]
+
+    async def _start_news_video(self, topic: str) -> str:
         if self._room is None:
             return "Video playback unavailable right now — continue reporting verbally."
-        result = await search_news_video(topic)
+        self._silence_filler_spoken = True
+        self._filler_speaking = False
+        search_topic = self._resolve_video_topic(topic)
+        if self._video_playing and (time.monotonic() - self._last_video_start_at) < 8.0:
+            return "The video is already playing on the viewer's screen — stay quiet until it ends."
+        result = await search_news_video(search_topic)
+        if result is None:
+            fallback_q = f"{self._preferred_location} latest news" if self._preferred_location else "India breaking news"
+            if fallback_q != search_topic:
+                result = await search_news_video(fallback_q)
         if result is None:
             await self._publish_studio(
-                {"type": "video_error", "topic": topic, "message": "video_not_found"}
+                {"type": "video_error", "topic": search_topic, "message": "video_not_found"}
             )
-            return f"Could not find a video for '{topic}' — continue reporting verbally."
+            return f"Could not find a video for '{search_topic}' — continue reporting verbally."
         video_id = result["video_id"]
         video_title = result["title"]
         thumbnail = result.get("thumbnail_url", "")
         channel = result.get("channel_title", "")
+        embed_url = f"https://news.200.234.41.50.sslip.io/api/youtube/embed/{video_id}"
         studio_video = {
             "type": "video_start",
             "videoId": video_id,
             "title": video_title,
-            "topic": topic,
+            "topic": search_topic,
             "thumbnailUrl": thumbnail,
             "channelTitle": channel,
-            "embedUrl": f"https://www.youtube.com/embed/{video_id}",
+            "embedUrl": embed_url,
         }
         try:
             # Legacy topic — existing clients still listen here.
@@ -1002,21 +1033,24 @@ class Assistant(Agent):
                     "type": "news_video",
                     "videoId": video_id,
                     "title": video_title,
-                    "topic": topic,
+                    "topic": search_topic,
                     "thumbnailUrl": thumbnail,
                     "channelTitle": channel,
+                    "embedUrl": embed_url,
                 }
             )
             await self._room.local_participant.publish_data(
                 legacy_payload.encode(), reliable=True, topic="news_video"
             )
             await self._publish_studio(studio_video)
-            await self._publish_studio({"type": "studio_state", "mode": "video", "topic": topic})
+            await self._publish_studio({"type": "studio_state", "mode": "video", "topic": search_topic})
         except Exception:
             logger.exception("play_news_video publish failed")
             return "Could not start the video — continue reporting verbally."
-        logger.info("[%s] news video started: topic=%r video_id=%s", self._session_type, topic, video_id)
+        logger.info("[%s] news video started: topic=%r video_id=%s", self._session_type, search_topic, video_id)
         self._video_playing = True
+        self._last_video_start_at = time.monotonic()
+        self._video_topic = search_topic
 
         async def _video_watchdog() -> None:
             try:
@@ -1032,6 +1066,11 @@ class Assistant(Agent):
             f"Video '{video_title}' is now playing full-screen on the viewer's device. "
             "Say ONE short line introducing it, then stay quiet until notified it ended."
         )
+
+    @function_tool
+    async def play_news_video(self, context: RunContext, topic: str) -> str:
+        """Play a YouTube clip on the viewer's screen. topic: what to search."""
+        return await self._start_news_video(topic)
 
     async def on_enter(self) -> None:
         try:
@@ -1341,6 +1380,8 @@ async def my_agent(ctx: JobContext) -> None:
     }
 
     async def _publish_mode(mode: str) -> None:
+        if agent._video_playing and mode != "video":
+            return
         await publish_studio_event(
             ctx.room,
             {
@@ -1695,7 +1736,7 @@ async def my_agent(ctx: JobContext) -> None:
                 await asyncio.sleep(THINKING_FILLER_DELAY_SECONDS)
             except asyncio.CancelledError:
                 return
-            if not should_speak_delayed_thinking_filler(
+            if agent._video_playing or not should_speak_delayed_thinking_filler(
                 agent_state=session.agent_state,
                 silence_filler_spoken=agent._silence_filler_spoken,
                 opening=agent._opening,
@@ -1750,6 +1791,7 @@ async def my_agent(ctx: JobContext) -> None:
             or session.agent_state in ("speaking", "thinking")
             or not ctx.room.isconnected()
             or agent._filler_speaking
+            or agent._video_playing
         ):
             return
         # Real assistant text already landed — nothing to recover.
@@ -1957,16 +1999,30 @@ async def my_agent(ctx: JobContext) -> None:
         try:
             payload = json.loads(data_packet.data.decode())
             msg_type = payload.get("type")
-            if msg_type == "news_video_ended":
-                topic = str(payload.get("topic", "that story"))
+            if msg_type in ("news_video_ended", "video_end"):
+                if not agent._video_playing:
+                    return
+                topic = str(payload.get("topic") or agent._video_topic or "that story")
                 skipped = bool(payload.get("skipped", False))
                 # In group sessions every participant sends this when their
                 # player closes — react only once per topic within a window.
                 now = time.monotonic()
-                if now - _video_reply_at.get(topic, float("-inf")) < 60.0:
+                if now - _video_reply_at.get(topic, float("-inf")) < 10.0:
                     return
                 _video_reply_at[topic] = now
                 asyncio.get_running_loop().create_task(_respond_to_video_end(topic, skipped))
+            elif msg_type == "play_video":
+                req_topic = str(payload.get("topic") or payload.get("query") or "")
+
+                async def _client_play_video(t: str) -> None:
+                    await asyncio.sleep(1.2)
+                    if agent._video_playing or (time.monotonic() - agent._last_video_start_at) < 8.0:
+                        return
+                    _cancel_thinking_filler()
+                    _cancel_empty_reply_recovery()
+                    await agent._start_news_video(t)
+
+                asyncio.get_running_loop().create_task(_client_play_video(req_topic))
         except Exception:
             logger.exception("on_data_received error")
 
