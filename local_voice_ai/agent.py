@@ -25,7 +25,7 @@ from livekit.agents import (
     room_io,
 )
 from livekit.agents.voice.agent_activity import update_instructions as _ctx_update_instructions
-from livekit.plugins import openai, silero, simli
+from livekit.plugins import openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from .services.agent_errors import classify_agent_error
@@ -44,7 +44,10 @@ from .services.spoken_lang import (
     is_language_switch_only,
     is_news_ask,
     is_stt_garbage,
+    is_video_ask,
+    is_video_stop_ask,
     language_bridge,
+    random_thinking_filler,
     speakify_brand,
     thinking_filler,
 )
@@ -741,9 +744,18 @@ class Assistant(Agent):
                     turn_ctx, instructions=self._instructions_text(), add_if_missing=True
                 )
         news_ask = is_news_ask(text)
+        video_ask = is_video_ask(text)
         if news_ask or switched:
             asyncio.create_task(
                 _warm_headline_cache(self, self._preferred_location or place or None)
+            )
+        if video_ask:
+            logger.info("video ask detected in user turn: %r", text[:80])
+            _ctx_update_instructions(
+                turn_ctx,
+                instructions=self._instructions_text()
+                + "\nCRITICAL: The viewer explicitly requested to see/play a video clip. You MUST invoke the play_news_video tool immediately with the requested story or city topic. Do not reply without calling play_news_video.\n",
+                add_if_missing=True,
             )
         if switched and is_language_switch_only(text):
             bridge = language_bridge(heard)
@@ -790,6 +802,20 @@ class Assistant(Agent):
                 "activeHeadline": items[0] if items else None,
             }
         )
+
+        # Smart Session Pre-Matcher: silently resolve video for top active stories in background
+        async def _prematch() -> None:
+            for art in articles[:2]:
+                title = str(art.get("title") or "").strip()
+                if title and "_video_result" not in art:
+                    try:
+                        res = await search_news_video(title, language=self._language)
+                        if res:
+                            art["_video_result"] = res
+                    except Exception:
+                        pass
+
+        asyncio.create_task(_prematch())
 
     async def _publish_headline_now(self) -> None:
         if not self._last_headlines:
@@ -976,14 +1002,29 @@ class Assistant(Agent):
     def _resolve_video_topic(self, topic: str) -> str:
         raw = (topic or "").strip()
         lowered = raw.lower()
-        generic_phrases = {
-            "", "video", "play video", "show video", "news video", "clip",
-            "play the video", "show the video", "watch video", "video dikhao",
-            "video chala do", "video chalao", "iska video", "this story",
-            "current story", "news", "latest news", "breaking news",
-            "वीडियो", "वीडियो चलाओ", "वीडियो दिखाओ", "ਵੀਡੀਓ", "ਵੀਡੀਓ ਚਲਾਓ",
+        cleaned = re.sub(
+            r"\b(can\s+you|could\s+you|i\s+want\s+to|please|"
+            r"play(\s+the)?\s*video|show(\s+the)?\s*video|watch(\s+the)?\s*video|play|show|watch|video|clip|"
+            r"dikhao|dikhaye|chalao|chala\s*do|sunao|batao|karo|"
+            r"ki|ka|ke|ko|se|me|mein|of|for|on|about|wali|wala|"
+            r"वीडियो|दिखाओ|चलाओ|ਚਲਾਓ|ਵੀਡੀਓ)\b",
+            "",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+        cleaned = " ".join(cleaned.split())
+
+        referential_phrases = {
+            "", "is", "iski", "iska", "ye", "yeh", "voh", "woh", "is news", "ye news",
+            "is khabar", "ye khabar", "is story", "ye story", "this", "that", "this news", "that news",
+            "this story", "that story", "current", "current story", "current news",
+            "today", "todays", "todays news", "latest", "latest news", "breaking",
+            "breaking news", "news", "khabar", "samachar",
         }
-        if lowered in generic_phrases or len(raw) < 3:
+
+        place = extract_place(raw) or canonical_place(raw) or extract_place(cleaned)
+
+        if cleaned in referential_phrases or len(cleaned) < 3:
             if self._last_headlines:
                 idx = max(0, self._headline_index - 1) % len(self._last_headlines)
                 title = str(self._last_headlines[idx].get("title") or "").strip()
@@ -992,6 +1033,10 @@ class Assistant(Agent):
             if self._preferred_location:
                 return f"{self._preferred_location} latest news"
             return "India breaking news"
+
+        if place and place != "national":
+            return f"{place} latest news"
+
         return raw[:90]
 
     async def _start_news_video(self, topic: str) -> str:
@@ -1002,11 +1047,24 @@ class Assistant(Agent):
         search_topic = self._resolve_video_topic(topic)
         if self._video_playing and (time.monotonic() - self._last_video_start_at) < 8.0:
             return "The video is already playing on the viewer's screen — stay quiet until it ends."
-        result = await search_news_video(search_topic)
+
+        # Check if active headline already has pre-matched video in memory (0ms instant hit!)
+        result = None
+        if self._last_headlines:
+            idx = max(0, self._headline_index - 1) % len(self._last_headlines)
+            active_art = self._last_headlines[idx]
+            if active_art.get("_video_result"):
+                active_title = str(active_art.get("title") or "")
+                if search_topic in active_title or active_title in search_topic or search_topic == active_title[:90]:
+                    result = active_art["_video_result"]
+                    logger.info("instant video pre-match hit: topic=%r video_id=%s", search_topic, result["video_id"])
+
+        if result is None:
+            result = await search_news_video(search_topic, language=self._language)
         if result is None:
             fallback_q = f"{self._preferred_location} latest news" if self._preferred_location else "India breaking news"
             if fallback_q != search_topic:
-                result = await search_news_video(fallback_q)
+                result = await search_news_video(fallback_q, language=self._language)
         if result is None:
             await self._publish_studio(
                 {"type": "video_error", "topic": search_topic, "message": "video_not_found"}
@@ -1054,12 +1112,16 @@ class Assistant(Agent):
 
         async def _video_watchdog() -> None:
             try:
-                await asyncio.sleep(180)
+                await asyncio.sleep(60)
             except asyncio.CancelledError:
                 return
             if self._video_playing:
-                logger.warning("video watchdog — clearing stuck video_playing after 180s")
+                logger.warning("video watchdog — clearing stuck video_playing after 60s")
                 self._video_playing = False
+                await self._publish_studio(
+                    {"type": "studio_state", "mode": "live", "anchorName": self._anchor_name}
+                )
+                asyncio.create_task(self._deliver_headline_via_tts(is_first=False))
 
         asyncio.create_task(_video_watchdog())
         return (
@@ -1185,7 +1247,7 @@ async def my_agent(ctx: JobContext) -> None:
     session_type = "group" if ctx.room.name.startswith("group_room_") else "individual"
 
     logger.info(
-        "agent session: type=%s stt=sarvam:%s llm=%s tts=sarvam-bulbul",
+        "agent session: type=%s stt=sarvam:%s (streaming) llm=%s tts=sarvam-bulbul (direct audio)",
         session_type, STT_MODEL, LLM_MODEL,
     )
 
@@ -1215,8 +1277,9 @@ async def my_agent(ctx: JobContext) -> None:
         face_id, voice, trial_seconds, language, anchor_name,
     )
 
-    # Simli routes TTS through DataStreamIO — audio pause/resume is not supported.
-    _use_simli = bool(SIMLI_API_KEY and face_id)
+    # Avatar video is driven client-side (Android/iOS switch talking/silence loops on TTS states).
+    # Disabling Simli proxy enables direct low-latency WebRTC audio and pause/resume.
+    _use_simli = False
 
     streamed_tts, tts_router = _build_tts(voice)
 
@@ -1236,8 +1299,8 @@ async def my_agent(ctx: JobContext) -> None:
                 "enabled": True,
                 "min_duration": 0.45,
                 "min_words": 2,
-                # Simli avatar cannot pause mid-utterance; rely on session.interrupt().
-                "resume_false_interruption": not _use_simli,
+                # Resume speech on brief false interruptions (coughs/noise) now that audio is direct WebRTC
+                "resume_false_interruption": True,
                 "false_interruption_timeout": 1.0,
             },
             "endpointing": {
@@ -1256,62 +1319,7 @@ async def my_agent(ctx: JobContext) -> None:
         },
     )
 
-    if _use_simli:
-        simli_avatar = None
-        simli_restart_attempts = 0
-        try:
-            simli_avatar = simli.AvatarSession(
-                simli_config=simli.SimliConfig(
-                    api_key=SIMLI_API_KEY,
-                    face_id=face_id,
-                ),
-            )
-            await simli_avatar.start(
-                session,
-                room=ctx.room,
-                livekit_url=SIMLI_LIVEKIT_URL,
-                livekit_api_key=LIVEKIT_API_KEY,
-                livekit_api_secret=LIVEKIT_API_SECRET,
-            )
-            logger.info("Simli avatar started: face_id=%s", face_id)
-
-            @ctx.room.on("participant_disconnected")
-            def _on_avatar_participant_left(participant: rtc.RemoteParticipant) -> None:
-                nonlocal simli_restart_attempts
-                identity = (participant.identity or "").lower()
-                if participant.identity == ctx.room.local_participant.identity:
-                    return
-                if "simli" not in identity and "avatar" not in identity:
-                    return
-                logger.warning(
-                    "Simli avatar participant disconnected: %s — attempting recovery",
-                    participant.identity,
-                )
-                if simli_avatar is None or simli_restart_attempts >= 1:
-                    return
-                simli_restart_attempts += 1
-
-                async def _restart_simli() -> None:
-                    try:
-                        await simli_avatar.start(
-                            session,
-                            room=ctx.room,
-                            livekit_url=SIMLI_LIVEKIT_URL,
-                            livekit_api_key=LIVEKIT_API_KEY,
-                            livekit_api_secret=LIVEKIT_API_SECRET,
-                        )
-                        logger.info("Simli avatar restarted after disconnect")
-                    except Exception:
-                        logger.exception(
-                            "Simli avatar restart failed — session continues (audio may be affected)"
-                        )
-
-                asyncio.create_task(_restart_simli())
-
-        except Exception:
-            logger.exception("Simli avatar failed to start — continuing as audio-only")
-    else:
-        logger.warning("SIMLI_API_KEY or face_id not set — avatar disabled")
+    logger.info("Avatar mode: direct WebRTC audio stream (mobile client renders talking/silence video natively)")
 
     agent = Assistant(session_type=session_type, room=ctx.room, anchor_name=anchor_name, language=language)
     agent._tts_router = tts_router
@@ -1547,6 +1555,10 @@ async def my_agent(ctx: JobContext) -> None:
             agent._last_whisper_lang = whisper_lang if isinstance(whisper_lang, str) else None
             if is_stt_garbage(raw_transcript):
                 logger.info("STT ignored (garbage): %r", raw_transcript[:120])
+                if _bc["paused"] and not _bc["conversation_mode"] and not agent._video_playing:
+                    _bc["paused"] = False
+                    _bc["user_turn_active"] = False
+                    asyncio.create_task(_continue_bulletin(delay=1.0))
                 return
             # Opening bulletin: ignore brief "thanks/ok", but accept real questions —
             # previously ALL speech was dropped while _opening, so early asks vanished.
@@ -1558,6 +1570,10 @@ async def my_agent(ctx: JobContext) -> None:
                 agent._opening = False
                 agent._opening_cut = True
             text = _correct_place_transcript(raw_transcript, collapse=False)
+            if agent._video_playing and text and is_video_stop_ask(text):
+                logger.info("viewer voice stop video command: %r", text)
+                asyncio.create_task(_respond_to_video_end(agent._video_topic or "the clip", skipped=True))
+                return
             if text:
                 logger.info("mic STT final (whisper=%s): %r", whisper_lang, text[:120])
                 _bc["user_turn_active"] = True
@@ -1978,16 +1994,21 @@ async def my_agent(ctx: JobContext) -> None:
                 ctx.room,
                 {"type": "studio_state", "mode": "live", "anchorName": anchor_name},
             )
+            spoken = agent._spoken_code()
             if skipped:
-                await session.say(
-                    "No problem — let's keep going with the news.",
-                    allow_interruptions=True,
-                )
+                line = {
+                    "hi": "जी बिल्कुल, चलिए आज की खबरों पर वापस आते हैं।",
+                    "pa": "ਜੀ ਬਿਲਕੁਲ, ਚਲੋ ਅੱਜ ਦੀਆਂ ਖ਼ਬਰਾਂ ਵੱਲ ਵਾਪਸ ਆਉਂਦੇ ਹਾਂ।",
+                    "en": "No problem — let's keep going with the news.",
+                }.get(spoken, "No problem — let's keep going with the news.")
+                await agent._say_language(spoken, line)
             else:
-                await session.say(
-                    f"That was the clip on {topic}. Next up in today's bulletin.",
-                    allow_interruptions=True,
-                )
+                line = {
+                    "hi": f"ये थी {topic} पर खास रिपोर्ट। अब अगली बड़ी खबर।",
+                    "pa": f"ਇਹ ਸੀ {topic} 'ਤੇ ਖ਼ਾਸ ਰਿਪੋਰਟ। ਹੁਣ ਅਗਲੀ ਵੱਡੀ ਖ਼ਬਰ।",
+                    "en": f"That was the clip on {topic}. Next up in today's bulletin.",
+                }.get(spoken, f"That was the clip on {topic}. Next up in today's bulletin.")
+                await agent._say_language(spoken, line)
             asyncio.create_task(_continue_bulletin())
         except Exception as exc:
             logger.exception("video end reply failed")

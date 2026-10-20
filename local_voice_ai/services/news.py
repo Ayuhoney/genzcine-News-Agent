@@ -128,11 +128,13 @@ _MIN_COMMUNITY_TITLE_LEN = 12
 _JUNK_TITLE = re.compile(
     r"\b(on[\s-]?road price|gold rate|silver rate|price in|rate today|aqi|"
     r"air quality|weather forecast|horoscope|numerology|lucky tips|birth numbers|"
-    r"bluetooth speaker|scalp care|on-screen calculator)\b",
+    r"bluetooth speaker|scalp care|on-screen calculator|"
+    r"rashifal|zodiac|kundali|lottery result|satta king|jackpot|"
+    r"how to buy|discount coupon|free recharge|weight loss tips|hair fall remedy)\b|"
+    r"(राशिफल|कुंडली|लॉटरी|सट्टा|सोने का भाव|चांदी का भाव)",
     re.I,
 )
-# Client-requested Indian papers. No official developer APIs.
-# English public RSS works for HT / The Hindu / TOI. Others via Google News.
+# Client-requested Indian papers + top national news agencies.
 _PREFERRED_PAPERS = (
     "Dainik Bhaskar",
     "Punjab Kesari",
@@ -144,8 +146,8 @@ _PREFERRED_PAPERS = (
 )
 _PREFERRED_SOURCE_RX = re.compile(
     r"bhaskar|punjab kesari|kesri|amar ujala|jagran|the hindu|"
-    r"times of india|hindustan times|"
-    r"भास्कर|केसरी|अमर उजाला|जागरण|द हिंदू|टाइम्स ऑफ इंडिया|हिंदुस्तान टाइम्स",
+    r"times of india|hindustan times|ndtv|ani|pti|india today|indian express|"
+    r"भास्कर|केसरी|अमर उजाला|जागरण|द हिंदू|टाइम्स ऑफ इंडिया|हिंदुस्तान टाइम्स|एनडीटीवी",
     re.I,
 )
 _OFFICIAL_PAPER_RSS = (
@@ -155,8 +157,9 @@ _OFFICIAL_PAPER_RSS = (
 )
 
 
-def _cache_key(query: Optional[str], language: str, limit: int) -> str:
-    return f"{language}:{query or ''}:{limit}"
+def _cache_key(query: Optional[str], language: str, limit: int = 0) -> str:
+    canon_q = (query or "").strip().lower()
+    return f"{language}:{canon_q}"
 
 
 def _get_cached_articles(cache_key: str) -> list[dict[str, Any]]:

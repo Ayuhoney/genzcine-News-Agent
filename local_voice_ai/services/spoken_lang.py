@@ -277,32 +277,74 @@ _LANG_BRIDGE = {
 
 # Covers LLM + news-tool silence so the avatar does not look frozen.
 # Native-script hold lines (Latin-only hi/en fillers 422 on Indic Sarvam).
-_THINKING_FILLER = {
-    "en": "Sure, one moment please\u2026 I\u2019m checking that now.",
-    "hi": "\u091c\u0940, \u090f\u0915 \u092a\u0932\u2026 \u092e\u0948\u0902 \u0905\u092d\u0940 \u0926\u0947\u0916\u0924\u0940 \u0939\u0942\u0901\u0964",
-    "pa": "\u0a1c\u0a40, \u0a07\u0a71\u0a15 \u0a2a\u0a32 \u0a2a\u0a32\u0a40\u0a1c\u0a3c\u2026 \u0a2e\u0a48\u0a02 \u0a39\u0a41\u0a23 \u0a1a\u0a48\u0a71\u0a15 \u0a15\u0a30\u0a26\u0a40 \u0a39\u0a3e\u0a02\u0964",
-    "bn": "\u099c\u09bf, \u098f\u0995\u099f\u09c1 \u09ae\u09c1\u09b9\u09c2\u09b0\u09cd\u09a4 \u09aa\u09cd\u09b2\u09bf\u099c\u2026 \u0986\u09ae\u09bf \u098f\u0996\u09a8 \u099a\u09c7\u0995 \u0995\u09b0\u099b\u09bf\u0964",
-    "ta": "\u0b9a\u0bb0\u0bbf, \u0b92\u0bb0\u0bc1 \u0ba8\u0bbf\u0bae\u0bbf\u0b9f\u0bae\u0bcd \u0baa\u0bcd\u0bb3\u0bc0\u0bb8\u0bcd\u2026 \u0ba8\u0bbe\u0ba9\u0bcd \u0b87\u0baa\u0bcd\u0baa\u0bcb \u0baa\u0bbe\u0bb0\u0bcd\u0b95\u0bcd\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bcd.",
-    "te": "\u0c38\u0c30\u0c47, \u0c12\u0c15 \u0c15\u0c4d\u0c37\u0c23\u0c02 \u0c2a\u0c4d\u0c32\u0c40\u0c1c\u0c4d\u2026 \u0c28\u0c47\u0c28\u0c41 \u0c07\u0c2a\u0c4d\u0c2a\u0c41\u0c21\u0c41 \u0c1a\u0c42\u0c38\u0c4d\u0c24\u0c41\u0c28\u0c4d\u0c28\u0c3e\u0c28\u0c41.",
-    "kn": "\u0cb8\u0cb0\u0cbf, \u0c92\u0c82\u0ca6\u0cc1 \u0c95\u0ccd\u0cb7\u0ca3 \u0caa\u0ccd\u0cb2\u0cc0\u0c9c\u0ccd\u2026 \u0ca8\u0cbe\u0ca8\u0cc1 \u0c88\u0c97 \u0ca8\u0ccb\u0ca1\u0cc1\u0ca4\u0ccd\u0ca4\u0cbf\u0ca6\u0ccd\u0ca6\u0cc7\u0ca8\u0cc6.",
-    "ml": "\u0d36\u0d30\u0d3f, \u0d12\u0d30\u0d41 \u0d28\u0d3f\u0d2e\u0d3f\u0d37\u0d02 \u0d2a\u0d4d\u0d32\u0d40\u0d38\u0d4d\u2026 \u0d1e\u0d3e\u0d28\u0d4d\u200d \u0d07\u0d2a\u0d4d\u0d2a\u0d4b\u0d7e \u0d28\u0d4b\u0d15\u0d4d\u0d15\u0d3e\u0d02.",
-    "mr": "\u091c\u0940, \u090f\u0915 \u0915\u094d\u0937\u0923\u2026 \u092e\u0940 \u0906\u0924\u093e \u0924\u092a\u093e\u0938\u0924\u0947.",
-    "gu": "\u0a9c\u0ac0, \u0a8f\u0a95 \u0a95\u0acd\u0ab7\u0aa3 \u0aaa\u0acd\u0ab2\u0ac0\u0a9d\u2026 \u0ab9\u0ac1\u0a82 \u0ab9\u0aae\u0aa3\u0abe\u0a82 \u0a9a\u0ac7\u0a95 \u0a95\u0ab0\u0ac1\u0a82 \u0a9b\u0ac1\u0a82.",
-    "od": "\u0b1c\u0b3f, \u0b17\u0b4b\u0b1f\u0b3f\u0b0f \u0b15\u0b4d\u0b37\u0b23 \u0b2a\u0b4d\u0b32\u0b3f\u0b1c\u0b4d\u2026 \u0b2e\u0b41\u0b01 \u0b0f\u0b2c\u0b47 \u0b26\u0b47\u0b16\u0b41\u0b1b\u0b3f\u0964",
+_THINKING_FILLERS: dict[str, tuple[str, ...]] = {
+    "en": (
+        "Sure, one moment please… I’m checking that now.",
+        "Right away… checking the latest on that now.",
+        "One moment please… pulling up the details.",
+        "Sure, let me check the headlines on that.",
+    ),
+    "hi": (
+        "जी, एक पल… मैं अभी देखती हूँ।",
+        "हाँजी, मैं ताज़ा अपडेट देख रही हूँ…",
+        "जी बिल्कुल, एक पल रुकिए…",
+        "एक सेकंड… मैं हेडलाइंस देख रही हूँ।",
+    ),
+    "pa": (
+        "ਜੀ, ਇੱਕ ਪਲ ਪਲੀਜ਼… ਮੈਂ ਹੁਣ ਚੈੱਕ ਕਰਦੀ ਹਾਂ।",
+        "ਹਾਂਜੀ, ਤਾਜ਼ਾ ਖ਼ਬਰਾਂ ਵੇਖ ਰਹੀ ਹਾਂ…",
+        "ਜੀ ਬਿਲਕੁਲ, ਇੱਕ ਮਿੰਟ ਜੀ…",
+        "ਇੱਕ ਪਲ… ਮੈਂ ਹੁਣੇ ਅੱਪਡੇਟ ਵੇਖਦੀ ਹਾਂ।",
+    ),
+    "bn": (
+        "জি, একটু মুহূর্ত প্লিজ… আমি এখন চেক করছি।",
+        "হ্যাঁ, আমি তাজা খবর দেখছি…",
+    ),
+    "ta": (
+        "சரி, ஒரு நிமிடம் ப்ளீஸ்… நான் இப்போ பார்க்கிறேன்.",
+        "சரி, இப்போது செய்தி பார்க்கிறேன்…",
+    ),
+    "te": (
+        "సరే, ఒక క్షణం ప్లీజ్… నేను ఇప్పుడు చూస్తున్నాను.",
+        "సరే, తాజా వార్తలు చూస్తున్నాను…",
+    ),
+    "kn": (
+        "ಸರಿ, ಒಂದು ಕ್ಷಣ ಪ್ಲೀಸ್… ನಾನು ಈಗ ನೋಡುತ್ತಿದ್ದೇನೆ.",
+        "ಹೌದು, ಇತ್ತೀಚಿನ ಸುದ್ದಿ ನೋಡುತ್ತಿದ್ದೇನೆ…",
+    ),
+    "ml": (
+        "ശരി, ഒരു നിമിഷം പ്ലീസ്… ഞാൻ ഇപ്പോൾ നോക്കാം.",
+        "അതെ, വാർത്തകൾ ഇപ്പോൾ പരിശോധിക്കാം…",
+    ),
+    "mr": (
+        "जी, एक क्षण… मी आता तपासते.",
+        "होय, मी ताजी बातमी पाहत आहे…",
+    ),
+    "gu": (
+        "જી, એક ક્ષણ પ્લીઝ… હું હમણાં ચેક કરું છું.",
+        "હા, હું તાજા સમાચાર જોઈ રહી છું…",
+    ),
+    "od": (
+        "ଜି, ଗୋଟିଏ କ୍ଷଣ ପ୍ଲିଜ୍… ମୁଁ ଏବେ ଦେଖୁଛି।",
+        "ହଁ, ମୁଁ ତାଜା ଖବର ଯାଞ୍ଚ କରୁଛି…",
+    ),
 }
+
+# Backward compatibility map: exact primary line per code
+_THINKING_FILLER = {code: lines[0] for code, lines in _THINKING_FILLERS.items()}
 
 # Native glue when Bulbul 422s on Latin-only text in an Indic session.
 _SCRIPT_GLUE = {
-    "hi": "\u091c\u0940\u0964 ",
-    "pa": "\u0a1c\u0a40\u0964 ",
-    "bn": "\u099c\u09bf\u0964 ",
-    "ta": "\u0b9a\u0bb0\u0bbf. ",
-    "te": "\u0c38\u0c30\u0c47. ",
-    "kn": "\u0cb8\u0cb0\u0cbf. ",
-    "ml": "\u0d36\u0d30\u0d3f. ",
-    "mr": "\u091c\u0940. ",
-    "gu": "\u0a9c\u0ac0. ",
-    "od": "\u0b1c\u0b3f. ",
+    "hi": "जी। ",
+    "pa": "ਜੀ। ",
+    "bn": "জি। ",
+    "ta": "சரி. ",
+    "te": "సరే. ",
+    "kn": "ಸರಿ. ",
+    "ml": "ശരി. ",
+    "mr": "जी. ",
+    "gu": "જી. ",
+    "od": "ଜି. ",
 }
 
 _SARVAM_SCRIPT = {
@@ -324,9 +366,50 @@ def language_bridge(code: str) -> str:
     return _LANG_BRIDGE.get(code, "")
 
 
-def thinking_filler(code: str) -> str:
+def thinking_filler(code: str, index: int | None = None) -> str:
     """Very short hold line while LLM / news fetch is in flight."""
-    return _THINKING_FILLER.get(code, _THINKING_FILLER["en"])
+    key = (code or "en").split("-")[0].lower()
+    if key == "or":
+        key = "od"
+    options = _THINKING_FILLERS.get(key) or _THINKING_FILLERS["en"]
+    if index is not None:
+        return options[index % len(options)]
+    return options[0]
+
+
+def random_thinking_filler(code: str) -> str:
+    """Pick a fresh human hold line so the anchor never sounds robotic."""
+    import random
+
+    key = (code or "en").split("-")[0].lower()
+    if key == "or":
+        key = "od"
+    options = _THINKING_FILLERS.get(key) or _THINKING_FILLERS["en"]
+    return random.choice(options)
+
+
+_VIDEO_ASK_PATTERNS = re.compile(
+    r"\b(video|clip|dikhao|dikhaye|chalao|chala\s*do|play(\s+the)?\s*video|show(\s+the)?\s*video|"
+    r"watch(\s+the)?\s*video|ਵੀਡੀਓ|ਵੀਡੀਓ\s*ਚਲਾਓ|वीडियो|वीडियो\s*दिखाओ|वीडियो\s*चलाओ)\b",
+    re.IGNORECASE,
+)
+
+_VIDEO_STOP_PATTERNS = re.compile(
+    r"\b(band\s*kar[od]?|band\s*karo|stop(\s+the)?\s*video|stop\s*clip|skip(\s+the)?\s*video|"
+    r"skip|pause(\s+the)?\s*video|hatao|hata\s*do|video\s*hatao|video\s*band|agla|"
+    r"agli\s*khabar|next\s*news|back\s*to\s*news|vapas\s*news|chalo\s*aage)\b",
+    re.IGNORECASE,
+)
+
+
+def is_video_ask(text: str) -> bool:
+    """True when user is asking to play/show a video clip."""
+    return bool(_VIDEO_ASK_PATTERNS.search(text or ""))
+
+
+def is_video_stop_ask(text: str) -> bool:
+    """True when viewer wants to close/skip the currently playing news video."""
+    return bool(_VIDEO_STOP_PATTERNS.search(text or ""))
 
 
 def is_language_switch_only(text: str) -> bool:
