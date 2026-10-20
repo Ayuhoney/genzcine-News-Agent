@@ -375,37 +375,45 @@ def _pause_llm(seconds: float) -> None:
     logger.info("LLM cooldown %.0fs — skip generate_reply until it expires", wait)
 
 _BASE_INSTRUCTIONS = """
-You are {anchor_name}, news anchor for this platform (Mohali). Voice only.
-The platform is GenzCine. In anything you speak, write the name exactly as "{brand}". Never write GenzCine, Genzcine, or Jain Cine.
-Opening already played; do not greet again or ask their city.
-The live bulletin already reads full stories one after another. Do not restart that bulletin yourself.
-If the viewer chats, answer naturally in a few sentences, then stop so the bulletin can resume.
-If they ask for news, call get_latest_news first and never invent. Read the first story fully — what happened, not only the title — in several sentences, then stop.
-play_news_video only if they ask for a clip.
-Understand English and Indian languages (Hindi, Punjabi, Bengali, Tamil, Telugu, Kannada, Malayalam, Marathi, Gujarati, Odia) including Hinglish.
-City names in any script are places, not language locks. Reply in the active session language's native script.
-No <think>, lists, or plan-narration.
+You are {anchor_name}, a distinguished, prime-time news anchor for {brand} broadcasting live from the Mohali newsroom. Voice only.
+In anything you speak, pronounce and write the platform name exactly as "{brand}". Never write GenzCine, Genzcine, or Jain Cine.
+
+PERSONA & ANCHORING STYLE:
+- You are an experienced, warm, and poised television news presenter. Connect with the viewer like a real human broadcast journalist having an interactive conversation.
+- When the viewer speaks, reacts, or asks a question, acknowledge them warmly and naturally (e.g., in Hindi: "जी बिल्कुल...", "बहुत अच्छा सवाल है आपका...", "इस बारे में ताज़ा अपडेट यह है..."; in English: "Certainly...", "That is an important question...", "Here is what our newsroom is tracking...").
+- Keep your tone dignified, calm, confident, and relatable. Never sound like a robotic search assistant, customer service bot, or automated IVR.
+- Explain the real-world human impact of every story — what happened, why it matters, and the current ground reality.
+- Keep your conversational answers concise and punchy (2 to 4 crisp spoken sentences), then naturally pause so the live bulletin can continue.
+
+NEWS & TOOLS:
+- If the viewer asks for news on any topic or city, always call get_latest_news. Never invent or speculate on facts. Present verified coverage with journalistic integrity.
+- If the viewer asks to see or play a video/clip, immediately call play_news_video.
+- The opening intro has already played; do not repeat introductory greetings or ask for their city unless relevant.
+- Understand English and Indian languages (Hindi, Punjabi, Bengali, Tamil, Telugu, Kannada, Malayalam, Marathi, Gujarati, Odia) including natural Hinglish.
+- City names in any script are geographic places, not language switches. Reply in the active session language's native script.
+- Strictly no <think> tags, no markdown bullet lists, asterisks, or internal plan monologue — speak only natural broadcast sentences.
 """
 
 # Session languages = Sarvam Bulbul + Sarvam-105B intersection (Whisper STT covers all).
 # code -> (display name, extra instruction for the LLM)
 _SCRIPT_REPLY = (
-    "Write EVERY reply in {script}. Do not open with Hey, Hello, or English sentences. "
-    "Say this platform's name as {brand}. Never write GenzCine."
+    "Speak in fluent, engaging, natural {language_name} in {script}. "
+    "Maintain the warm, authoritative tone of a national news presenter. "
+    "Do not open with robotic greetings. Say this platform's name as {brand}. Never write GenzCine."
 )
 _LANGUAGES: dict[str, tuple[str, str]] = {
-    "en-US": ("English", f"Use clear Indian English. Keep replies short. Say the platform name as {brand_spoken('en')}."),
-    "en-GB": ("English", f"Use clear Indian English. Keep replies short. Say the platform name as {brand_spoken('en')}."),
-    "hi": ("Hindi", _SCRIPT_REPLY.format(script="Devanagari script", brand=brand_spoken("hi"))),
-    "pa": ("Punjabi", _SCRIPT_REPLY.format(script="Gurmukhi script", brand=brand_spoken("pa"))),
-    "bn": ("Bengali", _SCRIPT_REPLY.format(script="Bengali script", brand=brand_spoken("bn"))),
-    "ta": ("Tamil", _SCRIPT_REPLY.format(script="Tamil script", brand=brand_spoken("ta"))),
-    "te": ("Telugu", _SCRIPT_REPLY.format(script="Telugu script", brand=brand_spoken("te"))),
-    "kn": ("Kannada", _SCRIPT_REPLY.format(script="Kannada script", brand=brand_spoken("kn"))),
-    "ml": ("Malayalam", _SCRIPT_REPLY.format(script="Malayalam script", brand=brand_spoken("ml"))),
-    "mr": ("Marathi", _SCRIPT_REPLY.format(script="Devanagari script (Marathi)", brand=brand_spoken("mr"))),
-    "gu": ("Gujarati", _SCRIPT_REPLY.format(script="Gujarati script", brand=brand_spoken("gu"))),
-    "od": ("Odia", _SCRIPT_REPLY.format(script="Odia script", brand=brand_spoken("od"))),
+    "en-US": ("English", f"Use clear, warm, engaging Indian broadcast English. Keep replies crisp, natural, and relatable. Say the platform name as {brand_spoken('en')}."),
+    "en-GB": ("English", f"Use clear, warm, engaging Indian broadcast English. Keep replies crisp, natural, and relatable. Say the platform name as {brand_spoken('en')}."),
+    "hi": ("Hindi", _SCRIPT_REPLY.format(language_name="Hindi", script="Devanagari script", brand=brand_spoken("hi"))),
+    "pa": ("Punjabi", _SCRIPT_REPLY.format(language_name="Punjabi", script="Gurmukhi script", brand=brand_spoken("pa"))),
+    "bn": ("Bengali", _SCRIPT_REPLY.format(language_name="Bengali", script="Bengali script", brand=brand_spoken("bn"))),
+    "ta": ("Tamil", _SCRIPT_REPLY.format(language_name="Tamil", script="Tamil script", brand=brand_spoken("ta"))),
+    "te": ("Telugu", _SCRIPT_REPLY.format(language_name="Telugu", script="Telugu script", brand=brand_spoken("te"))),
+    "kn": ("Kannada", _SCRIPT_REPLY.format(language_name="Kannada", script="Kannada script", brand=brand_spoken("kn"))),
+    "ml": ("Malayalam", _SCRIPT_REPLY.format(language_name="Malayalam", script="Malayalam script", brand=brand_spoken("ml"))),
+    "mr": ("Marathi", _SCRIPT_REPLY.format(language_name="Marathi", script="Devanagari script (Marathi)", brand=brand_spoken("mr"))),
+    "gu": ("Gujarati", _SCRIPT_REPLY.format(language_name="Gujarati", script="Gujarati script", brand=brand_spoken("gu"))),
+    "od": ("Odia", _SCRIPT_REPLY.format(language_name="Odia", script="Odia script", brand=brand_spoken("od"))),
 }
 
 
@@ -443,61 +451,41 @@ def _trim_description(text: str, *, limit: int = 520) -> str:
     return f"{cut}..."
 
 
-def _tv_open_segments(anchor_name: str, viewer_name: str | None) -> list[tuple[str, str]]:
-    """Trilingual ident: Hindi + Punjabi + English — all Sarvam Priya.
-
-    The Hindi/Punjabi lines are fixed text (no viewer name) so the Sarvam PCM
-    cache serves them instantly and for free; the name goes in the English line.
-    Whole ident ≈ 8s — the old 20s version lost viewers before the first story.
-    """
-    hi = "\u0928\u092e\u0938\u094d\u0924\u0947\u0964"  # नमस्ते।
-    pa = "\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32 \u0a1c\u0a40\u0964"  # ਸਤ ਸ੍ਰੀ ਅਕਾਲ ਜੀ।
+def _tv_open_segments(anchor_name: str, viewer_name: str | None, language: str = "en") -> list[tuple[str, str]]:
+    """Engaging, realistic news anchor intro matched to the viewer's language."""
+    spoken = SESSION_TO_SPOKEN.get(language, "en") if language else "en"
+    if spoken == "hi":
+        greet = f"नमस्कार {viewer_name} जी।" if viewer_name else "नमस्कार।"
+        text = (
+            f"{greet} {brand_spoken('hi')} पर आपका स्वागत है। "
+            f"मैं हूँ {anchor_name}, आपकी लाइव न्यूज़ एंकर। "
+            "आप मुझसे हिंदी, पंजाबी या इंग्लिश — किसी भी भाषा में सवाल पूछ सकते हैं। "
+            "चलिए रुख करते हैं आज के मुख्य बुलेटिन की ओर।"
+        )
+        return [("hi", text)]
+    if spoken == "pa":
+        greet = f"ਸਤ ਸ੍ਰੀ ਅਕਾਲ {viewer_name} ਜੀ।" if viewer_name else "ਸਤ ਸ੍ਰੀ ਅਕਾਲ ਜੀ।"
+        text = (
+            f"{greet} {brand_spoken('pa')} 'ਤੇ ਤੁਹਾਡਾ ਸਵਾਗਤ ਹੈ। "
+            f"ਮੈਂ ਹਾਂ ਤੁਹਾਡੀ ਲਾਈਵ ਨਿਊਜ਼ ਐਂਕਰ {anchor_name}। "
+            "ਤੁਸੀਂ ਮੇਰੇ ਨਾਲ ਪੰਜਾਬੀ, ਹਿੰਦੀ ਜਾਂ ਇੰਗਲਿਸ਼ ਵਿੱਚ ਗੱਲਬਾਤ ਕਰ ਸਕਦੇ ਹੋ। "
+            "ਆਓ ਸ਼ੁਰੂ ਕਰਦੇ ਹਾਂ ਅੱਜ ਦੇ ਮੁੱਖ ਬੁਲੇਟਿਨ ਨਾਲ।"
+        )
+        return [("pa", text)]
     welcome = f"Welcome, {viewer_name}." if viewer_name else "Welcome."
-    en = (
-        f"{welcome} You're watching {brand_spoken('en')} — I'm {anchor_name}. "
-        "Speak any Indian language or English. Here's today's bulletin."
+    text = (
+        f"Namaste, Sat Sri Akal, and {welcome.lower()} "
+        f"You're watching {brand_spoken('en')} — I'm {anchor_name}, live from the newsroom. "
+        "Feel free to speak to me anytime in Hindi, Punjabi, or English. "
+        "Let's begin with today's top stories."
     )
-    return [("hi", hi), ("pa", pa), ("en", en)]
+    return [("en", text)]
 
 
 def _tv_open(anchor_name: str, viewer_name: str | None, language: str) -> str:
-    """Single-language ident (used after the viewer has already switched)."""
-    if language == "hi":
-        namaste = (
-            f"\u0928\u092e\u0938\u094d\u0924\u0947 {viewer_name} \u091c\u0940\u0964"
-            if viewer_name
-            else "\u0928\u092e\u0938\u094d\u0924\u0947\u0964"
-        )
-        return (
-            f"{namaste} आप देख रहे हैं {brand_spoken('hi')}। "
-            f"\u092e\u0948\u0902 {anchor_name} \u0939\u0942\u0901, "
-            "\u0906\u092a\u0915\u0940 \u0932\u093e\u0907\u0935 \u0928\u094d\u092f\u0942\u091c\u093c \u090f\u0902\u0915\u0930\u0964 "
-            "\u0938\u0924 \u0936\u094d\u0930\u0940 \u0905\u0915\u093e\u0932\u0964 "
-            "\u0939\u093f\u0902\u0926\u0940, \u092a\u0902\u091c\u093e\u092c\u0940, English \u2014 "
-            "\u0906\u092a \u091c\u093f\u0938 \u092d\u093e\u0937\u093e \u092e\u0947\u0902 \u092c\u094b\u0932\u0947\u0902, \u092e\u0948\u0902 \u0909\u0938\u0940 \u092e\u0947\u0902 \u091c\u0935\u093e\u092c \u0926\u0942\u0901\u0917\u0940\u0964 "
-            "\u0906\u091c \u0915\u0940 \u0916\u092c\u0930\u094b\u0902 \u092e\u0947\u0902 \u0938\u094d\u0935\u093e\u0917\u0924 \u0939\u0948\u0964"
-        )
-    if language == "pa":
-        sat = (
-            f"\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32 {viewer_name} \u0a1c\u0a40\u0964"
-            if viewer_name
-            else "\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32 \u0a1c\u0a40\u0964"
-        )
-        return (
-            f"{sat} ਤੁਸੀਂ ਵੇਖ ਰਹੇ ਹੋ {brand_spoken('pa')}। "
-            f"\u0a2e\u0a48\u0a02 {anchor_name} \u0a39\u0a3e\u0a02, "
-            "\u0a24\u0a41\u0a39\u0a3e\u0a21\u0a40 \u0a32\u0a3e\u0a08\u0a35 \u0a28\u0a3f\u0a0a\u0a1c\u0a3c \u0a10\u0a02\u0a15\u0a30\u0964 "
-            "\u0a28\u0a2e\u0a38\u0a24\u0a47\u0964 "
-            "\u0a39\u0a3f\u0a70\u0a26\u0a40, \u0a2a\u0a70\u0a1c\u0a3e\u0a2c\u0a40, English \u2014 "
-            "\u0a24\u0a41\u0a38\u0a40\u0a02 \u0a1c\u0a3f\u0a38 \u0a2d\u0a3e\u0a38\u0a3c\u0a3e \u0a35\u0a3f\u0a71\u0a1a \u0a2c\u0a4b\u0a32\u0a4b, \u0a2e\u0a48\u0a02 \u0a09\u0a38\u0a47 \u0a35\u0a3f\u0a71\u0a1a \u0a1c\u0a35\u0a3e\u0a2c \u0a26\u0a3f\u0a06\u0a02\u0a17\u0a40\u0964 "
-            "\u0a05\u0a71\u0a1c \u0a26\u0a40\u0a06\u0a02 \u0a16\u0a3c\u0a2c\u0a30\u0a3e\u0a02 \u0a35\u0a3f\u0a71\u0a1a \u0a1c\u0a40 \u0a06\u0a07\u0a06\u0a02 \u0a28\u0a42\u0a70\u0964"
-        )
-    welcome = f"Welcome, {viewer_name}." if viewer_name else "Welcome."
-    return (
-        f"You're watching {brand_spoken('en')}. I'm {anchor_name}, live from the newsroom. "
-        "Hindi, Punjabi, English — speak any language, I'll follow you. "
-        f"{welcome} Here's today's bulletin."
-    )
+    """Single-language ident text."""
+    segments = _tv_open_segments(anchor_name, viewer_name, language)
+    return " ".join(line for _, line in segments)
 
 
 def _headline_spoken_parts(
@@ -513,17 +501,28 @@ def _headline_spoken_parts(
     source = str(article.get("source") or "").strip()
     title = speakify_brand(title, "en")
     source = speakify_brand(source, "en")
-    brand = brand_spoken("en")
+    spoken = SESSION_TO_SPOKEN.get(language, "en")
+    brand = brand_spoken(spoken)
     if article.get("provider") == "community":
-        title = f"From a {brand} reporter: {title}"
+        title = f"{brand} reporter update: {title}" if spoken == "en" else f"{brand} रिपोर्टर की रिपोर्ट: {title}"
     elif article.get("provider") == "genzcine":
-        title = f"From {brand} local: {title}"
-    lead = f"This is from {source}. " if source else ""
+        title = f"{brand} news desk: {title}" if spoken == "en" else f"{brand} डेस्क से: {title}"
+
+    if source:
+        if spoken == "hi":
+            lead = f"{source} की रिपोर्ट के अनुसार: "
+        elif spoken == "pa":
+            lead = f"{source} ਦੀ ਰਿਪੋਰਟ ਮੁਤਾਬਕ: "
+        else:
+            lead = f"According to {source}: "
+    else:
+        lead = ""
+
     body = f"{lead}{title}. {desc}".strip() if desc else f"{lead}{title}."
-    if language == "hi":
+    if spoken == "hi":
         bridge = "पहली बड़ी खबर।" if is_first else _HEADLINE_BRIDGES_HI[index % len(_HEADLINE_BRIDGES_HI)]
         return bridge.strip(), body
-    if language == "pa":
+    if spoken == "pa":
         bridge = "ਪਹਿਲੀ ਵੱਡੀ ਖ਼ਬਰ।" if is_first else _HEADLINE_BRIDGES_PA[index % len(_HEADLINE_BRIDGES_PA)]
         return bridge.strip(), body
     if language in _LANGUAGES and language not in ("en-US", "en-GB", "en"):
@@ -904,14 +903,15 @@ class Assistant(Agent):
         await self._safe_say(line, wait=wait)
 
     async def _speak_trilingual_open(self, viewer_name: str | None) -> None:
-        """Namaste (hi) → Sat Sri Akal (pa) → English ident — all Sarvam Priya."""
-        for code, line in _tv_open_segments(self._anchor_name, viewer_name):
+        """Language-matched live broadcast intro — Sarvam Priya."""
+        for code, line in _tv_open_segments(self._anchor_name, viewer_name, self._language):
             if not self._can_speak() or self._opening_cut or not self._opening:
-                logger.info("trilingual open aborted (cut=%s)", self._opening_cut)
+                logger.info("intro aborted (cut=%s)", self._opening_cut)
                 return
             await self._say_language(code, line)
         if self._tts_router is not None and self._opening and not self._opening_cut:
-            self._tts_router.set_spoken("en")
+            spoken = self._spoken_code()
+            self._tts_router.set_spoken(spoken if spoken in SARVAM_LANGS else "en")
 
     def _spoken_mapped(self, code: str) -> str | None:
         mapped = SPOKEN_TO_SESSION.get(code)
@@ -1171,7 +1171,13 @@ class Assistant(Agent):
                 if opened:
                     await self._deliver_headline_via_tts(is_first=False)
                 elif self._can_speak() and not self._opening_cut:
-                    await self._say_language("en", "I'll bring you the latest as it comes in.")
+                    spoken = self._spoken_code()
+                    fallback_line = {
+                        "hi": "ताज़ा खबरों के लिए हम लगातार न्यूज़ डेस्क से जुड़े हुए हैं।",
+                        "pa": "ਤਾਜ਼ਾ ਖ਼ਬਰਾਂ ਲਈ ਅਸੀਂ ਲਗਾਤਾਰ ਨਿਊਜ਼ ਡੈਸਕ ਨਾਲ ਜੁੜੇ ਹੋਏ ਹਾਂ।",
+                        "en": "I'll bring you the latest as it comes in.",
+                    }.get(spoken, "I'll bring you the latest as it comes in.")
+                    await self._say_language(spoken, fallback_line)
             finally:
                 self._opening = False
                 # Cut only gates the intro — clear so idle bulletin can speak later.
@@ -1689,6 +1695,7 @@ async def my_agent(ctx: JobContext) -> None:
                 or _bc["conversation_mode"]
                 or _bc["user_turn_active"]
                 or agent._video_playing
+                or agent._opening
                 or not ctx.room.isconnected()
                 or _bc["user_state"] == "speaking"
                 or session.agent_state in ("speaking", "thinking")
@@ -1914,7 +1921,7 @@ async def my_agent(ctx: JobContext) -> None:
                         asyncio.create_task(_publish_mode("conversation"))
                         _schedule_conversation_idle()
                     # Headline was interrupted — wait for STT/reply, do not resume yet.
-                elif not _bc["paused"]:
+                elif not _bc["paused"] and not agent._opening:
                     asyncio.create_task(_continue_bulletin())
         except Exception:
             logger.exception("_on_agent_state_changed error")
