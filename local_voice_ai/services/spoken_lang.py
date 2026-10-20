@@ -412,6 +412,63 @@ def is_video_stop_ask(text: str) -> bool:
     return bool(_VIDEO_STOP_PATTERNS.search(text or ""))
 
 
+_MUSIC_ASK_PATTERNS = re.compile(
+    r"(?:\b(music|gaana|gana|song|songs|geet|sangeet|track|play\s+music|play\s+song|"
+    r"gaana\s+bajao|gana\s+bajao|music\s+bajao|music\s+chalao|gaana\s+chalao|gana\s+chalao|"
+    r"koi\s+song|koi\s+gaana|koi\s+gana|koi\s+music|lofi|lo-fi)\b|"
+    r"(?:ਸੰਗੀਤ|ਗਾਣਾ|ਗਾਣੇ|ਗੀਤ|ਸੰਗੀਤ|ਗਾਣਿਆਂ|संगीत|गाना|गाने|गीत))",
+    re.IGNORECASE,
+)
+
+_MUSIC_CHANGE_PATTERNS = re.compile(
+    r"(?:\b(change\s*song|song\s*change|next\s*song|dusra\s*gaana|doosra\s*gaana|dusra\s*gana|doosra\s*gana|"
+    r"agla\s*gaana|agla\s*gana|change\s*music|music\s*change|change\s*karo|badlo|"
+    r"gaana\s*badlo|gana\s*badlo|koi\s*aur\s*gaana|koi\s*aur\s*gana|koi\s*aur\s*song|hor\s*gaana)\b|"
+    r"(?:ਦੂਜਾ\s*ਗਾਣਾ|ਦੂਸਰਾ\s*ਗਾਣਾ|ਅਗਲਾ\s*ਗਾਣਾ|दूसरा\s*गाना|अगला\s*गाना|ਗਾਣਾ\s*ਬਦਲੋ|ਗਾਣਾ\s*ਬਦਲ|ਗਾਣੇ\s*ਬਦਲੋ|गाना\s*बदलो|गाना\s*बदल))",
+    re.IGNORECASE,
+)
+
+_NEWS_CHOICE_PATTERNS = re.compile(
+    r"(?:\b(news|khabar|khabrein|samachar|bulletin|news\s*chalao|news\s*continue|continue\s*news|"
+    r"news\s*sunao|khabar\s*sunao|khabrein\s*sunao|aaj\s*ki\s*khabar|aaj\s*ka\s*samachar|"
+    r"wapas\s*news|vapas\s*news|shuru\s*karo|khabran)\b|"
+    r"(?:ਖ਼ਬਰਾਂ|ਖਬਰਾਂ|ਖ਼ਬਰ|ਖਬਰ|ਸਮਾਚਾਰ|ਬੁਲੇਟਿਨ|ख़बरें|खबरें|ख़बर|खबर|समाचार|बुलेटिन|न्यूज़|न्यूज))",
+    re.IGNORECASE,
+)
+
+
+def is_music_ask(text: str) -> bool:
+    """True when user is asking to play music or a song."""
+    return bool(_MUSIC_ASK_PATTERNS.search(text or ""))
+
+
+def is_music_change_ask(text: str) -> bool:
+    """True when user wants to change/switch to another song."""
+    return bool(_MUSIC_CHANGE_PATTERNS.search(text or ""))
+
+
+def is_news_choice_ask(text: str) -> bool:
+    """True when user chooses or wants to continue news bulletin."""
+    return bool(_NEWS_CHOICE_PATTERNS.search(text or ""))
+
+
+def extract_music_query(text: str) -> str:
+    """Extract clean song/artist query from user utterance like 'Arijit Singh ka gana bajao'."""
+    raw = (text or "").strip()
+    cleaned = re.sub(
+        r"\b(can\s+you|could\s+you|please|i\s+want\s+to\s+listen\s+to|listen\s+to|"
+        r"play(\s+the)?|play|music|song|songs|track|gaana|gana|geet|sangeet|"
+        r"bajao|baja\s+do|chalao|chala\s+do|sunao|suna\s+do|lagao|laga\s+do|karo|kar\s+do|kijiye|"
+        r"ka|ki|ke|ko|se|me|mein|da|di|de|of|for|on|about|wali|wala|koi|kuch|ek)\b|"
+        r"(?:गाने|गाना|गीत|संगीत|बजाओ|बजा\s+दो|चलाओ|चला\s+दो|सुनाओ|ਸੁਣਾਓ|ਗਾਣਾ|ਗਾਣੇ|ਗੀਤ|ਚਲਾਓ|ਬਜਾਓ|ਕਰੋ|ਕਰ\s+ਦੋ|ਦਾ|ਦੀ|ਦੇ)",
+        " ",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    cleaned = " ".join(cleaned.split()).strip()
+    return cleaned if len(cleaned) >= 2 else raw
+
+
 def is_language_switch_only(text: str) -> bool:
     """True when the viewer only asked to change language, not for news."""
     raw = text or ""

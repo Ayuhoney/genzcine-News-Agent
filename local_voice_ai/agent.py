@@ -46,13 +46,17 @@ from .services.spoken_lang import (
     is_stt_garbage,
     is_video_ask,
     is_video_stop_ask,
+    is_music_ask,
+    is_music_change_ask,
+    is_news_choice_ask,
+    extract_music_query,
     language_bridge,
     random_thinking_filler,
     speakify_brand,
     thinking_filler,
 )
 from .services.studio_events import STUDIO_TOPIC, headline_article, publish_studio_event
-from .services.youtube import search_news_video
+from .services.youtube import search_news_video, search_music_video
 
 logger = logging.getLogger("agent")
 
@@ -388,6 +392,7 @@ PERSONA & ANCHORING STYLE:
 NEWS & TOOLS:
 - If the viewer asks for news on any topic or city, always call get_latest_news. Never invent or speculate on facts. Present verified coverage with journalistic integrity.
 - If the viewer asks to see or play a video/clip, immediately call play_news_video.
+- If the viewer asks to play music, a song, or a specific singer/genre (e.g. 'koi gaana bajao', 'play music', 'Arijit Singh ka song lagao'), immediately call the play_music tool with their requested song or genre.
 - The opening intro has already played; do not repeat introductory greetings or ask for their city unless relevant.
 - Understand English and Indian languages (Hindi, Punjabi, Bengali, Tamil, Telugu, Kannada, Malayalam, Marathi, Gujarati, Odia) including natural Hinglish.
 - City names in any script are geographic places, not language switches. Reply in the active session language's native script.
@@ -459,8 +464,7 @@ def _tv_open_segments(anchor_name: str, viewer_name: str | None, language: str =
         text = (
             f"{greet} {brand_spoken('hi')} पर आपका स्वागत है। "
             f"मैं हूँ {anchor_name}, आपकी लाइव न्यूज़ एंकर। "
-            "आप मुझसे हिंदी, पंजाबी या इंग्लिश — किसी भी भाषा में सवाल पूछ सकते हैं। "
-            "चलिए रुख करते हैं आज के मुख्य बुलेटिन की ओर।"
+            "क्या आप आज के मुख्य बुलेटिन से शुरुआत करना चाहेंगे, या फिर पहले कोई बढ़िया म्यूजिक सुनना पसंद करेंगे?"
         )
         return [("hi", text)]
     if spoken == "pa":
@@ -468,16 +472,14 @@ def _tv_open_segments(anchor_name: str, viewer_name: str | None, language: str =
         text = (
             f"{greet} {brand_spoken('pa')} 'ਤੇ ਤੁਹਾਡਾ ਸਵਾਗਤ ਹੈ। "
             f"ਮੈਂ ਹਾਂ ਤੁਹਾਡੀ ਲਾਈਵ ਨਿਊਜ਼ ਐਂਕਰ {anchor_name}। "
-            "ਤੁਸੀਂ ਮੇਰੇ ਨਾਲ ਪੰਜਾਬੀ, ਹਿੰਦੀ ਜਾਂ ਇੰਗਲਿਸ਼ ਵਿੱਚ ਗੱਲਬਾਤ ਕਰ ਸਕਦੇ ਹੋ। "
-            "ਆਓ ਸ਼ੁਰੂ ਕਰਦੇ ਹਾਂ ਅੱਜ ਦੇ ਮੁੱਖ ਬੁਲੇਟਿਨ ਨਾਲ।"
+            "ਕੀ ਤੁਸੀਂ ਅੱਜ ਦੇ ਮੁੱਖ ਬੁਲੇਟਿਨ ਨਾਲ ਸ਼ੁਰੂਆਤ ਕਰਨਾ ਚਾਹੋਗੇ, ਜਾਂ ਪਹਿਲਾਂ ਕੋਈ ਵਧੀਆ ਮਿਊਜ਼ਿਕ ਸੁਣਨਾ ਪਸੰਦ ਕਰੋਗੇ?"
         )
         return [("pa", text)]
     welcome = f"Welcome, {viewer_name}." if viewer_name else "Welcome."
     text = (
         f"Namaste, Sat Sri Akal, and {welcome.lower()} "
         f"You're watching {brand_spoken('en')} — I'm {anchor_name}, live from the newsroom. "
-        "Feel free to speak to me anytime in Hindi, Punjabi, or English. "
-        "Let's begin with today's top stories."
+        "Would you like to begin with today's news bulletin, or would you prefer some music first?"
     )
     return [("en", text)]
 
@@ -657,6 +659,7 @@ class Assistant(Agent):
         self._anchor_name = anchor_name
         self._language = language
         self._video_playing = False
+        self._music_playing = False
         self._last_video_start_at: float = 0.0
         self._video_topic: str = ""
         self._last_headlines: list[dict] = []
@@ -666,6 +669,8 @@ class Assistant(Agent):
         self._last_whisper_lang: str | None = None
         self._opening = False
         self._opening_cut = False
+        self._awaiting_intro_choice = False
+        self._intro_choice_event = asyncio.Event()
         self._viewer_gone = False
         # Silence cover: set when a filler already spoke this turn; avoid doubles.
         self._silence_filler_spoken = False
@@ -826,6 +831,8 @@ class Assistant(Agent):
                 "type": "headline_now",
                 "activeIndex": idx,
                 "headline": article,
+                "expression": "talking",
+                "gesture": "explaining",
             }
         )
         self._headline_index += 1
@@ -904,6 +911,17 @@ class Assistant(Agent):
 
     async def _speak_trilingual_open(self, viewer_name: str | None) -> None:
         """Language-matched live broadcast intro — Sarvam Priya."""
+        await self._publish_studio(
+            {
+                "type": "studio_state",
+                "mode": "live",
+                "anchorName": self._anchor_name,
+                "state": "speaking",
+                "isSpeaking": True,
+                "expression": "warm_smile",
+                "gesture": "welcoming",
+            }
+        )
         for code, line in _tv_open_segments(self._anchor_name, viewer_name, self._language):
             if not self._can_speak() or self._opening_cut or not self._opening:
                 logger.info("intro aborted (cut=%s)", self._opening_cut)
@@ -1134,6 +1152,98 @@ class Assistant(Agent):
         """Play a YouTube clip on the viewer's screen. topic: what to search."""
         return await self._start_news_video(topic)
 
+    async def _start_music(self, query: str = "") -> str:
+        if self._room is None:
+            return "Music playback unavailable right now."
+        self._silence_filler_spoken = True
+        self._filler_speaking = False
+
+        res = await search_music_video(query or "trending hit songs", language=self._language)
+        if not res:
+            logger.warning("Could not find music track for: %r", query)
+            spoken = self._spoken_code()
+            fail_line = {
+                "hi": "माफ़ कीजिए, अभी वह गाना नहीं मिल पाया। चलिए आज की खबरों पर चलते हैं।",
+                "pa": "ਮਾਫ਼ ਕਰਨਾ, ਉਹ ਗਾਣਾ ਨਹੀਂ ਮਿਲ ਸਕਿਆ। ਚਲੋ ਖ਼ਬਰਾਂ ਵੱਲ ਚੱਲਦੇ ਹਾਂ।",
+                "en": "Sorry, couldn't find that track right now. Let's continue with the news.",
+            }.get(spoken, "Sorry, couldn't find that track right now.")
+            await self._say_language(spoken, fail_line)
+            return "Music not found."
+
+        video_id = res["video_id"]
+        title = res["title"]
+        thumbnail = res.get("thumbnail_url", "")
+        channel = res.get("channel_title", "")
+        embed_url = f"https://news.200.234.41.50.sslip.io/api/youtube/embed/{video_id}"
+
+        legacy_payload = json.dumps(
+            {
+                "type": "news_video",
+                "videoId": video_id,
+                "title": title,
+                "topic": f"Music: {title}",
+                "thumbnailUrl": thumbnail,
+                "channelTitle": channel,
+                "embedUrl": embed_url,
+                "isMusic": True,
+            }
+        )
+        try:
+            await self._room.local_participant.publish_data(
+                legacy_payload.encode(), reliable=True, topic="news_video"
+            )
+            await self._publish_studio(
+                {
+                    "type": "video_start",
+                    "videoId": video_id,
+                    "title": title,
+                    "topic": f"Music: {title}",
+                    "thumbnailUrl": thumbnail,
+                    "channelTitle": channel,
+                    "embedUrl": embed_url,
+                    "isMusic": True,
+                }
+            )
+            await self._publish_studio(
+                {
+                    "type": "studio_state",
+                    "mode": "music",
+                    "topic": title,
+                    "expression": "listening_to_music",
+                    "gesture": "relaxed",
+                }
+            )
+            self._video_playing = True
+            self._music_playing = True
+            self._last_video_start_at = time.monotonic()
+            self._video_topic = f"Music: {title}"
+            logger.info("[%s] music video started: %r video_id=%s", self._session_type, title, video_id)
+        except Exception:
+            logger.exception("play music publish failed")
+            return "Could not start music."
+
+        async def _music_watchdog() -> None:
+            try:
+                await asyncio.sleep(180)
+            except asyncio.CancelledError:
+                return
+            if self._music_playing:
+                logger.info("music watchdog — track finished after 180s")
+                self._music_playing = False
+                self._video_playing = False
+                await self._publish_studio(
+                    {"type": "studio_state", "mode": "live", "anchorName": self._anchor_name}
+                )
+                asyncio.create_task(self._deliver_headline_via_tts(is_first=False))
+
+        asyncio.create_task(_music_watchdog())
+        return f"Music track '{title}' is now playing full-screen on the viewer's device."
+
+    @function_tool
+    async def play_music(self, context: RunContext, query: str = "") -> str:
+        """Play a music video / song requested by the viewer. query: song name or artist."""
+        return await self._start_music(query)
+
     async def on_enter(self) -> None:
         try:
             room = self._room
@@ -1154,6 +1264,8 @@ class Assistant(Agent):
 
             self._opening = True
             self._opening_cut = False
+            self._awaiting_intro_choice = True
+            self._intro_choice_event.clear()
             try:
                 await self._speak_trilingual_open(viewer_name)
                 if self._opening_cut or not self._can_speak():
@@ -1162,10 +1274,22 @@ class Assistant(Agent):
                         self._session_type,
                     )
                     return
+
+                # Wait up to 4.5s for viewer to choose music or news
+                try:
+                    await asyncio.wait_for(self._intro_choice_event.wait(), timeout=4.5)
+                except asyncio.TimeoutError:
+                    logger.info("[%s] intro choice timeout — proceeding to news bulletin", self._session_type)
+
+                self._awaiting_intro_choice = False
+
+                if self._opening_cut or not self._can_speak() or self._music_playing or self._video_playing:
+                    return
+
                 opened = await self._deliver_headline_via_tts(
                     is_first=True, viewer_name=viewer_name
                 )
-                if self._opening_cut or not self._can_speak():
+                if self._opening_cut or not self._can_speak() or self._music_playing or self._video_playing:
                     logger.info("[%s] on_enter stopped after first headline", self._session_type)
                     return
                 if opened:
@@ -1180,6 +1304,7 @@ class Assistant(Agent):
                     await self._say_language(spoken, fallback_line)
             finally:
                 self._opening = False
+                self._awaiting_intro_choice = False
                 # Cut only gates the intro — clear so idle bulletin can speak later.
                 self._opening_cut = False
         except RuntimeError as exc:
@@ -1571,14 +1696,61 @@ async def my_agent(ctx: JobContext) -> None:
             if agent._opening and is_intro_ack(raw_transcript):
                 logger.info("STT ignored (intro ack): %r", raw_transcript[:120])
                 return
+
+            text = _correct_place_transcript(raw_transcript, collapse=False)
+
+            # 1. Intro Choice handling (Music vs News)
+            if agent._awaiting_intro_choice and text:
+                if is_music_ask(text):
+                    logger.info("viewer chose music during intro: %r", text)
+                    agent._intro_choice_event.set()
+                    agent._opening = False
+                    agent._opening_cut = True
+                    spoken = agent._spoken_code()
+                    song_q = extract_music_query(text)
+                    confirm = {
+                        "hi": "जी बिल्कुल, आपके लिए म्यूजिक शुरू कर रही हूँ।",
+                        "pa": "ਜੀ ਬਿਲਕੁਲ, ਤੁਹਾਡੇ ਲਈ ਮਿਊਜ਼ਿਕ ਸ਼ੁਰੂ ਕਰ ਰਹੀ ਹਾਂ।",
+                        "en": "Sure, playing music for you right now.",
+                    }.get(spoken, "Sure, playing music for you right now.")
+                    asyncio.create_task(agent._say_language(spoken, confirm))
+                    asyncio.create_task(agent._start_music(song_q))
+                    return
+                elif is_news_choice_ask(text):
+                    logger.info("viewer chose news during intro: %r", text)
+                    agent._intro_choice_event.set()
+                    return
+
+            # 2. While Music is Playing (Change song / Back to news)
+            if agent._music_playing and text:
+                if is_music_change_ask(text) or (is_music_ask(text) and not is_news_choice_ask(text)):
+                    logger.info("viewer voice change song command: %r", text)
+                    spoken = agent._spoken_code()
+                    song_q = extract_music_query(text)
+                    confirm = {
+                        "hi": "जी बिल्कुल, नया गाना प्ले कर रही हूँ।",
+                        "pa": "ਜੀ ਬਿਲਕੁਲ, ਨਵਾਂ ਗਾਣਾ ਸ਼ੁਰੂ ਕਰ ਰਹੀ ਹਾਂ।",
+                        "en": "Sure! Switching tracks now.",
+                    }.get(spoken, "Sure! Switching tracks now.")
+                    asyncio.create_task(agent._say_language(spoken, confirm))
+                    asyncio.create_task(agent._start_music(song_q))
+                    return
+                elif is_video_stop_ask(text) or is_news_choice_ask(text):
+                    logger.info("viewer voice stop music / back to news command: %r", text)
+                    agent._music_playing = False
+                    asyncio.create_task(_respond_to_video_end("the music", skipped=True))
+                    return
+
             if agent._opening:
                 logger.info("viewer spoke during intro — cutting open for: %r", raw_transcript[:120])
                 agent._opening = False
                 agent._opening_cut = True
-            text = _correct_place_transcript(raw_transcript, collapse=False)
+
             if agent._video_playing and text and is_video_stop_ask(text):
                 logger.info("viewer voice stop video command: %r", text)
-                asyncio.create_task(_respond_to_video_end(agent._video_topic or "the clip", skipped=True))
+                topic = "the music" if agent._music_playing else (agent._video_topic or "the clip")
+                agent._music_playing = False
+                asyncio.create_task(_respond_to_video_end(topic, skipped=True))
                 return
             if text:
                 logger.info("mic STT final (whisper=%s): %r", whisper_lang, text[:120])
@@ -1868,8 +2040,55 @@ async def my_agent(ctx: JobContext) -> None:
             task.cancel()
         _bc["empty_reply_task"] = None
 
+    def _compute_avatar_expression(state: str) -> tuple[str, str]:
+        if state == "speaking":
+            if agent._opening:
+                return "warm_smile", "welcoming"
+            if agent._music_playing:
+                return "listening_to_music", "relaxed"
+            if agent._filler_speaking:
+                return "thoughtful", "nodding"
+            return "talking", "explaining"
+        elif state == "thinking":
+            return "thoughtful", "thinking"
+        else:
+            if agent._music_playing:
+                return "listening_to_music", "relaxed"
+            return "attentive", "neutral"
+
+    async def _emit_avatar_expression(state: str) -> None:
+        expr, gest = _compute_avatar_expression(state)
+        mode = "music" if agent._music_playing else ("conversation" if _bc["conversation_mode"] else "live")
+        is_spk = (state == "speaking")
+        await publish_studio_event(
+            ctx.room,
+            {
+                "type": "studio_state",
+                "mode": mode,
+                "anchorName": anchor_name,
+                "language": agent._language,
+                "state": state,
+                "isSpeaking": is_spk,
+                "expression": expr,
+                "gesture": gest,
+            },
+        )
+        await publish_studio_event(
+            ctx.room,
+            {
+                "type": "avatar_state",
+                "mode": mode,
+                "anchorName": anchor_name,
+                "state": state,
+                "isSpeaking": is_spk,
+                "expression": expr,
+                "gesture": gest,
+            },
+        )
+
     def _on_agent_state_changed(ev) -> None:
         try:
+            asyncio.create_task(_emit_avatar_expression(ev.new_state))
             if ev.new_state == "thinking" and _bc["paused"] and _bc["user_turn_active"]:
                 # Do NOT clear _filler_speaking here — filler audio may still be playing.
                 _cancel_empty_reply_recovery()
@@ -1983,6 +2202,8 @@ async def my_agent(ctx: JobContext) -> None:
 
     async def _respond_to_video_end(topic: str, skipped: bool) -> None:
         try:
+            was_music = agent._music_playing or topic.startswith("Music:") or topic == "the music"
+            agent._music_playing = False
             agent._video_playing = False
             _cancel_conversation_idle()
             _bc["conversation_mode"] = False
@@ -1995,14 +2216,37 @@ async def my_agent(ctx: JobContext) -> None:
                     "type": "video_end",
                     "topic": topic,
                     "skipped": skipped,
+                    "isMusic": was_music,
                 },
             )
             await publish_studio_event(
                 ctx.room,
-                {"type": "studio_state", "mode": "live", "anchorName": anchor_name},
+                {
+                    "type": "studio_state",
+                    "mode": "live",
+                    "anchorName": anchor_name,
+                    "state": "speaking",
+                    "isSpeaking": True,
+                    "expression": "talking",
+                    "gesture": "explaining",
+                },
             )
             spoken = agent._spoken_code()
-            if skipped:
+            if was_music:
+                if skipped:
+                    line = {
+                        "hi": "जी बिल्कुल, चलिए आज की मुख्य खबरों की ओर रुख करते हैं।",
+                        "pa": "ਜੀ ਬਿਲਕੁਲ, ਆਓ ਅੱਜ ਦੇ ਮੁੱਖ ਬੁਲੇਟਿਨ ਵੱਲ ਰੁਖ ਕਰਦੇ ਹਾਂ।",
+                        "en": "Sure, let's head right into today's top news stories.",
+                    }.get(spoken, "Sure, let's head right into today's top news stories.")
+                else:
+                    line = {
+                        "hi": "उम्मीद है आपको यह म्यूजिक पसंद आया होगा। चलिए अब रुख करते हैं आज के मुख्य समाचारों की ओर।",
+                        "pa": "ਉਮੀਦ ਹੈ ਤੁਹਾਨੂੰ ਇਹ ਮਿਊਜ਼ਿਕ ਪਸੰਦ ਆਇਆ ਹੋਵੇਗਾ। ਆਓ ਹੁਣ ਸ਼ੁਰੂ ਕਰਦੇ ਹਾਂ ਅੱਜ ਦੀਆਂ ਮੁੱਖ ਖ਼ਬਰਾਂ।",
+                        "en": "Hope you enjoyed that music! Now let's dive into today's top headlines.",
+                    }.get(spoken, "Hope you enjoyed that music! Now let's dive into today's top headlines.")
+                await agent._say_language(spoken, line)
+            elif skipped:
                 line = {
                     "hi": "जी बिल्कुल, चलिए आज की खबरों पर वापस आते हैं।",
                     "pa": "ਜੀ ਬਿਲਕੁਲ, ਚਲੋ ਅੱਜ ਦੀਆਂ ਖ਼ਬਰਾਂ ਵੱਲ ਵਾਪਸ ਆਉਂਦੇ ਹਾਂ।",
@@ -2039,6 +2283,13 @@ async def my_agent(ctx: JobContext) -> None:
                     return
                 _video_reply_at[topic] = now
                 asyncio.get_running_loop().create_task(_respond_to_video_end(topic, skipped))
+            elif msg_type == "play_music":
+                req_query = str(payload.get("query") or payload.get("topic") or "")
+                asyncio.get_running_loop().create_task(agent._start_music(req_query))
+            elif msg_type in ("stop_music", "news_continue"):
+                if agent._music_playing:
+                    agent._music_playing = False
+                    asyncio.get_running_loop().create_task(_respond_to_video_end("the music", skipped=True))
             elif msg_type == "play_video":
                 req_topic = str(payload.get("topic") or payload.get("query") or "")
 
