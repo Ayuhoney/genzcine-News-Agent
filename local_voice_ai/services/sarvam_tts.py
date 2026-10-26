@@ -38,8 +38,8 @@ _SAMPLE_RATE = 24000
 
 _SENT_END = re.compile(r"(?<=[.!?\u0964\u061f])[\"'\u201d\u2019)]?\s+")
 _ABBREV = re.compile(r"\b(?:Dr|Mr|Mrs|Ms|St|No|Rs|vs|Lt|Gen|Col)\.$", re.IGNORECASE)
-_MIN_SENTENCE_CHARS = 12
-_PREFETCH = 1
+_MIN_SENTENCE_CHARS = 28
+_PREFETCH = 2
 
 
 def split_complete_sentences(buffer: str) -> tuple[list[str], str]:
@@ -58,7 +58,7 @@ def split_complete_sentences(buffer: str) -> tuple[list[str], str]:
 class _PcmCache:
     """Tiny content-addressed PCM cache on disk. Best-effort; never raises."""
 
-    def __init__(self, root: str, *, max_chars: int = 400, max_files: int = 4000) -> None:
+    def __init__(self, root: str, *, max_chars: int = 800, max_files: int = 4000) -> None:
         self._root = Path(root)
         self._max_chars = max_chars
         self._max_files = max_files
@@ -153,8 +153,64 @@ class SarvamTTS(tts.TTS):
         text: str,
         *,
         conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
+        language: str | None = None,
     ) -> tts.ChunkedStream:
-        return _SarvamChunkedStream(tts=self, input_text=text, conn_options=conn_options)
+        return _SarvamChunkedStream(
+            tts=self,
+            input_text=text,
+            conn_options=conn_options,
+            language=language or self._language,
+        )
+
+    async def prewarm_sentence(self, text: str, language: str) -> None:
+        """Fetch and cache a single sentence in the background if not already cached."""
+        clean = (text or "").strip()
+        if not clean or not self._cache.cacheable(clean):
+            return
+        lang_key = language if language in SARVAM_TTS_CODE else "en"
+        key = self.cache_key(clean, lang_key)
+        if self._cache.get(key) is not None:
+            return
+        lang_code = SARVAM_TTS_CODE.get(lang_key, "en-IN")
+        resp: httpx.Response | None = None
+        try:
+            body = {
+                "text": clean[:3500],
+                "language_code": lang_code,
+                "target_language_code": lang_code,
+                "model": _SARVAM_MODEL,
+                "speaker": self._speaker,
+                "output_audio_codec": "linear16",
+                "speech_sample_rate": _SAMPLE_RATE,
+            }
+            headers = {"api-subscription-key": self._api_key, "Content-Type": "application/json"}
+            req = self._client.build_request("POST", _SARVAM_HTTP, headers=headers, json=body)
+            resp = await self._client.send(req, stream=True)
+            if resp.status_code == 422 and not has_sarvam_script(clean, lang_key) and lang_key != "en":
+                await resp.aclose()
+                lang_key = "en"
+                lang_code = SARVAM_TTS_CODE["en"]
+                key = self.cache_key(clean, lang_key)
+                if self._cache.get(key) is not None:
+                    return
+                body["language_code"] = lang_code
+                body["target_language_code"] = lang_code
+                req = self._client.build_request("POST", _SARVAM_HTTP, headers=headers, json=body)
+                resp = await self._client.send(req, stream=True)
+            if resp.status_code >= 400:
+                return
+            buf = bytearray()
+            async for chunk in resp.aiter_bytes():
+                if chunk:
+                    buf += chunk
+            if buf:
+                self._cache.put(key, bytes(buf))
+                logger.info("Sarvam prewarmed lang=%s chars=%d", lang_key, len(clean))
+        except Exception:
+            pass
+        finally:
+            if resp is not None:
+                await resp.aclose()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -163,9 +219,17 @@ class SarvamTTS(tts.TTS):
 class _SarvamChunkedStream(tts.ChunkedStream):
     """One sentence → Bulbul HTTP stream (or cache hit) → PCM frames."""
 
-    def __init__(self, *, tts: SarvamTTS, input_text: str, conn_options: APIConnectOptions) -> None:
+    def __init__(
+        self,
+        *,
+        tts: SarvamTTS,
+        input_text: str,
+        conn_options: APIConnectOptions,
+        language: str | None = None,
+    ) -> None:
         super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
         self._tts: SarvamTTS = tts
+        self._language: str = language or tts._language
 
     async def _request(self, text: str, lang: str) -> httpx.Response:
         body = {
@@ -183,7 +247,7 @@ class _SarvamChunkedStream(tts.ChunkedStream):
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         text = (self.input_text or "").strip()
-        language = self._tts._language
+        language = self._language
         lang = SARVAM_TTS_CODE.get(language, "en-IN")
         output_emitter.initialize(
             request_id=str(uuid.uuid4()),
@@ -301,8 +365,25 @@ class LanguageRoutedTTS(tts.TTS):
         *,
         conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
     ) -> tts.ChunkedStream:
-        self._lang_for(text)
-        return self._sarvam.synthesize(text, conn_options=conn_options)
+        lang = self._lang_for(text)
+        return self._sarvam.synthesize(text, conn_options=conn_options, language=lang)
+
+    async def prewarm(self, text: str, spoken_lang: str | None = None) -> None:
+        """Pre-synthesize all sentences of a line into the PCM disk cache."""
+        clean = (text or "").strip()
+        if not clean:
+            return
+        base_lang = spoken_lang if spoken_lang in SARVAM_LANGS else self.spoken
+        done, tail = split_complete_sentences(clean)
+        tail = tail.strip()
+        if tail:
+            done.append(tail)
+        for sentence in done:
+            s = sentence.strip()
+            if not s:
+                continue
+            lang = tts_lang_for_text(s, base_lang)
+            await self._sarvam.prewarm_sentence(s, lang)
 
     def stream(
         self, *, conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS
@@ -323,7 +404,7 @@ class _SarvamSynthesizeStream(tts.SynthesizeStream):
     def _start(self, sentence: str) -> tts.ChunkedStream:
         lang = self._router._lang_for(sentence)
         logger.info("TTS sentence → sarvam:%s chars=%d", lang, len(sentence))
-        return self._router._sarvam.synthesize(sentence)
+        return self._router._sarvam.synthesize(sentence, language=lang)
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         output_emitter.initialize(
@@ -367,6 +448,7 @@ class _SarvamSynthesizeStream(tts.SynthesizeStream):
             while True:
                 stream = await queue.get()
                 if stream is None:
+                    output_emitter.flush()
                     return
                 self._mark_started()
                 first_audio.clear()
@@ -381,7 +463,6 @@ class _SarvamSynthesizeStream(tts.SynthesizeStream):
                 finally:
                     first_audio.set()
                     slots.release()
-                output_emitter.flush()
 
         tasks = [asyncio.create_task(_forward_input()), asyncio.create_task(_drain())]
         try:

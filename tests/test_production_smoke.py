@@ -116,24 +116,22 @@ async def test_prod_full_viewer_session_smoke(agent: Assistant) -> None:
     )
     assert names == ["Ayush"]
     segs = _tv_open_segments("NOVA", names[0])
-    assert [c for c, _ in segs] == ["hi", "en"]
-    assert "Ayush" in segs[1][1]
+    assert [c for c, _ in segs] == ["en"]
+    assert "Ayush" in segs[0][1]
 
     spoken_codes: list[str] = []
 
     async def _cap_open(code: str, line: str, *, wait: bool = True) -> None:
         spoken_codes.append(code)
-        if code == "hi":
-            # Viewer asks mid-Namaste.
-            agent._opening = False
-            agent._opening_cut = True
+        agent._opening = False
+        agent._opening_cut = True
 
     agent._opening = True
     agent._opening_cut = False
     agent._say_language = AsyncMock(side_effect=_cap_open)
     # Keep real _can_speak — only force connected room.
     await agent._speak_trilingual_open(names[0])
-    assert spoken_codes == ["hi"], "must not continue into Punjabi/English after barge-in"
+    assert spoken_codes == ["en"], "single seamless intro utterance"
     assert agent._opening_cut is True
 
     # on_enter finally clears cut so later bulletin works

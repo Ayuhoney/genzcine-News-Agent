@@ -197,13 +197,14 @@ def test_intro_segments_use_native_scripts() -> None:
     from local_voice_ai.agent import _tv_open_segments
 
     segs = _tv_open_segments("TINA", None)
-    assert [c for c, _ in segs] == ["hi", "en"]
-    assert tts_lang_for_text(segs[0][1], "en") == "hi"
-    assert tts_lang_for_text(segs[1][1], "en") == "en"
-    assert "\u0928\u092e\u0938\u094d\u0924\u0947" in segs[0][1]
+    assert [c for c, _ in segs] == ["en"]
+    assert tts_lang_for_text(segs[0][1], "en") == "en"
+    assert "Namaste" in segs[0][1]
     named = _tv_open_segments("TINA", "Ayush")
-    assert named[0][1] == segs[0][1]
-    assert "Ayush" in named[1][1]
+    assert "Ayush" in named[0][1]
+    hi_segs = _tv_open_segments("TINA", "Ayush", "hi")
+    assert [c for c, _ in hi_segs] == ["hi"]
+    assert "\u0928\u092e\u0938\u094d\u0924\u0947" in hi_segs[0][1]
 
 
 def test_whisper_label_alone_needs_enough_words() -> None:
@@ -219,7 +220,7 @@ def test_sentence_splitter_streams_per_sentence() -> None:
     from local_voice_ai.services.sarvam_tts import split_complete_sentences
 
     done, rest = split_complete_sentences("Our top story. Punjab CM announces relief. Officials say")
-    assert done == ["Our top story.", "Punjab CM announces relief."]
+    assert done == ["Our top story. Punjab CM announces relief."]
     assert rest == "Officials say"
     done, rest = split_complete_sentences(
         "\u0905\u0917\u0932\u0940 \u0916\u092c\u0930\u0964 Punjab CM announces flood relief. More soon"

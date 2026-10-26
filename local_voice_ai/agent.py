@@ -205,13 +205,17 @@ def _build_tts(_voice: str = "") -> tuple[LanguageRoutedTTS, LanguageRoutedTTS]:
 
 
 async def _warm_headline_cache(agent: "Assistant", query: str | None = None) -> None:
-    """Fetch in the background so the LLM tool call hits cache (saves one RTT)."""
+    """Fetch in the background so the LLM tool call and opening bulletin hit cache."""
     try:
-        await fetch_latest_news(
+        articles = await fetch_latest_news(
             query=query,
             language=agent._language,
             limit=NEWS_HEADLINE_LIMIT,
         )
+        if articles and not query and not agent._last_headlines:
+            await agent._publish_headlines(articles, topic="")
+            await asyncio.sleep(0.25)
+            await agent._prewarm_headline_tts(0, is_first=True)
     except Exception:
         logger.exception("headline cache warm failed")
 
@@ -226,9 +230,9 @@ BULLETIN_RESUME_AFTER_USER_SECONDS = float(os.getenv("BULLETIN_RESUME_AFTER_USER
 # can ask follow-ups. Timer resets on each new final STT line.
 CONVERSATION_IDLE_SECONDS = float(os.getenv("CONVERSATION_IDLE_SECONDS", "12"))
 REPLY_NUDGE_RETRIES = max(1, int(os.getenv("REPLY_NUDGE_RETRIES", "3")))
-REPLY_NUDGE_DELAY_SECONDS = float(os.getenv("REPLY_NUDGE_DELAY_SECONDS", "1.2"))
+REPLY_NUDGE_DELAY_SECONDS = float(os.getenv("REPLY_NUDGE_DELAY_SECONDS", "2.5"))
 # Speak a short hold line if the agent stays in "thinking" this long (LLM + news tool).
-THINKING_FILLER_DELAY_SECONDS = float(os.getenv("THINKING_FILLER_DELAY_SECONDS", "0.45"))
+THINKING_FILLER_DELAY_SECONDS = float(os.getenv("THINKING_FILLER_DELAY_SECONDS", "1.1"))
 # How many headlines the LLM is shown per tool call (spoken mix stays NEWS_HEADLINE_LIMIT).
 LLM_NEWS_LINES = max(1, int(os.getenv("LLM_NEWS_LINES", "3")))
 
@@ -452,24 +456,21 @@ def _trim_description(text: str, *, limit: int = 520) -> str:
 
 
 def _tv_open_segments(anchor_name: str, viewer_name: str | None, language: str = "en") -> list[tuple[str, str]]:
-    """Engaging, realistic news anchor intro in Hindi and English only."""
+    """Engaging, realistic news anchor intro in Hindi and English only (single seamless utterance)."""
     spoken = SESSION_TO_SPOKEN.get(language, "en") if language else "en"
     if spoken == "hi":
-        greet = f"नमस्ते {viewer_name} जी।" if viewer_name else "नमस्ते।"
+        greet = f"नमस्ते {viewer_name} जी," if viewer_name else "नमस्ते,"
         text = (
-            f"{greet} {brand_spoken('hi')} पर आपका स्वागत है। "
-            f"मैं हूँ {anchor_name}, न्यूज़ रूम से लाइव। आइए शुरू करते हैं आज की बड़ी खबरें।"
+            f"{greet} {brand_spoken('hi')} पर आपका स्वागत है — "
+            f"मैं हूँ {anchor_name}, न्यूज़ रूम से लाइव, आइए शुरू करते हैं आज की बड़ी खबरें।"
         )
         return [("hi", text)]
-    welcome = f"Welcome, {viewer_name}." if viewer_name else "Welcome."
+    welcome = f"Namaste {viewer_name}, and welcome" if viewer_name else "Namaste, and welcome"
     text = (
-        f"{welcome} You're watching {brand_spoken('en')} — I'm {anchor_name}, "
+        f"{welcome} to {brand_spoken('en')} — I'm {anchor_name}, "
         "live from the newsroom with today's top headlines."
     )
-    return [
-        ("hi", "नमस्ते।"),
-        ("en", text),
-    ]
+    return [("en", text)]
 
 
 def _tv_open(anchor_name: str, viewer_name: str | None, language: str) -> str:
@@ -865,6 +866,30 @@ class Assistant(Agent):
             }
         )
 
+    async def _prewarm_headline_tts(self, index: int, *, is_first: bool = False) -> None:
+        """Pre-synthesize a headline into the disk cache so playout starts with zero gap."""
+        router = self._tts_router
+        if router is None or not hasattr(router, "prewarm") or not self._last_headlines:
+            return
+        try:
+            idx = index % len(self._last_headlines)
+            article = self._last_headlines[idx]
+            bridge, body = _headline_spoken_parts(
+                article,
+                is_first=is_first,
+                index=idx,
+                language=self._language,
+            )
+            spoken = self._spoken_code()
+            if bridge and spoken != "en" and not has_sarvam_script(body, spoken):
+                await router.prewarm(bridge, spoken)
+                if body:
+                    await router.prewarm(body, "en")
+            else:
+                await router.prewarm(f"{bridge} {body}".strip(), spoken)
+        except Exception:
+            pass
+
     async def _deliver_headline_via_tts(
         self,
         *,
@@ -891,6 +916,18 @@ class Assistant(Agent):
         )
         await self._publish_headline_now()
         spoken = self._spoken_code()
+
+        # Prewarm the next story in the background while this story plays.
+        async def _warm_next(next_idx: int) -> None:
+            try:
+                await asyncio.sleep(0.6)
+                await self._prewarm_headline_tts(next_idx, is_first=False)
+            except Exception:
+                pass
+
+        if len(self._last_headlines) > 1:
+            asyncio.create_task(_warm_next(idx + 1))
+
         # Native opener, then en-IN for Latin wire copy — avoids cartoon Hindi-on-English TTS.
         if bridge and spoken != "en" and not has_sarvam_script(body, spoken):
             await self._say_language(spoken, bridge)
@@ -1350,7 +1387,7 @@ async def my_agent(ctx: JobContext) -> None:
         turn_handling={
             "interruption": {
                 "enabled": True,
-                "min_duration": 0.45,
+                "min_duration": 0.65,
                 "min_words": 2,
                 # Resume speech on brief false interruptions (coughs/noise) now that audio is direct WebRTC
                 "resume_false_interruption": True,
@@ -2024,32 +2061,33 @@ async def my_agent(ctx: JobContext) -> None:
         try:
             _bc["user_state"] = ev.new_state
             if ev.new_state == "speaking":
-                logger.info("viewer speaking — pausing bulletin")
-                _bc["user_turn_active"] = True
-                _bc["paused"] = True
+                # Raw VAD fires frequently on mobile loudspeaker echo and slight background noise.
+                # Do NOT call session.interrupt() or set _bc["paused"] = True here — let
+                # LiveKit's min_words=2 interruption and _on_user_input_transcribed handle real speech.
                 _cancel_resume_task()
-                _cancel_reply_nudge()
                 _cancel_conversation_idle()
-                _cancel_thinking_filler()
-                # Soft pause only — wait for final STT before hard interrupt / conversation.
-                # Coughs & noise otherwise kill the bulletin for CONVERSATION_IDLE_SECONDS.
                 task = _bc.get("continue_task")
                 if task and not task.done():
                     task.cancel()
-                try:
-                    session.interrupt(force=False)
-                except Exception:
-                    logger.exception("session.interrupt failed while user speaking")
-            elif ev.new_state == "listening" and _bc["paused"] and _bc["user_turn_active"]:
-                _cancel_resume_task()
-                if not _bc["conversation_mode"]:
-                    _bc["resume_task"] = asyncio.create_task(_resume_bulletin_after_user_turn())
+            elif ev.new_state == "listening":
+                if _bc["paused"] and _bc["user_turn_active"]:
+                    _cancel_resume_task()
+                    if not _bc["conversation_mode"]:
+                        _bc["resume_task"] = asyncio.create_task(_resume_bulletin_after_user_turn())
+                    elif (
+                        not _bc["agent_responding_to_user"]
+                        and session.agent_state not in ("speaking", "thinking")
+                    ):
+                        # Follow-up window — restart idle if speech did not trigger a new reply.
+                        _schedule_conversation_idle()
                 elif (
-                    not _bc["agent_responding_to_user"]
-                    and session.agent_state not in ("speaking", "thinking")
+                    not _bc["paused"]
+                    and not _bc["user_turn_active"]
+                    and not agent._opening
+                    and not agent._video_playing
+                    and session.agent_state in ("listening", "idle")
                 ):
-                    # Follow-up window — restart idle if speech did not trigger a new reply.
-                    _schedule_conversation_idle()
+                    asyncio.create_task(_continue_bulletin(delay=0.2))
         except Exception:
             logger.exception("_on_user_state_changed error")
 
