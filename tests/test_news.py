@@ -328,7 +328,7 @@ def test_mix_buckets_interleaves_published_local_global():
 
 
 @pytest.mark.asyncio
-async def test_fetch_latest_news_puts_community_first(monkeypatch):
+async def test_fetch_latest_news_default_uses_breaking_news_not_community(monkeypatch):
     async def fake_community(*_args, **_kwargs):
         return [
             {
@@ -354,7 +354,16 @@ async def test_fetch_latest_news_puts_community_first(monkeypatch):
         ]
 
     async def fake_rss(*_args, **_kwargs):
-        return []
+        return [
+            {
+                "title": "Parliament passes key economic bill",
+                "description": "",
+                "link": "",
+                "source": "The Hindu",
+                "pubDate": "",
+                "provider": "google_rss",
+            }
+        ]
 
     async def fake_official(*_args, **_kwargs):
         return []
@@ -366,7 +375,7 @@ async def test_fetch_latest_news_puts_community_first(monkeypatch):
 
     _HEADLINE_CACHE.clear()
     articles = await fetch_latest_news(language="en-US", limit=2)
-    assert articles[0]["provider"] == "community"
+    assert articles[0]["provider"] == "google_rss"
     assert articles[1]["provider"] == "newsdata"
 
 

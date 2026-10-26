@@ -232,13 +232,20 @@ def is_intro_ack(text: str) -> bool:
     return bool(_INTRO_ACK.match((text or "").strip()))
 
 _NEWS_NOUN = re.compile(
-    r"news|headline|khabar|khabr|\u0916\u092c\u0930|\u0a16\u0a2c\u0a30|"
-    r"bulletin|headlines|\u0938\u092e\u093e\u091a\u093e\u0930",
+    r"news|headline|khabar|khabr|\u0916\u092c\u0930|\u0a16\u0a2c\u0a30|\u0a16\u0a3c\u0a2c\u0a30|"
+    r"bulletin|headlines|\u0938\u092e\u093e\u091a\u093e\u0930|"
+    r"\blatest\b|\bupdate(?:s)?\b|ताज़ा|ताजा|लेटेस्ट|अपडेट|दुनिया|वर्ल्ड|\bworld\b",
     re.IGNORECASE,
 )
 _NEWS_VERB = re.compile(
     r"batao|bataiye|tell\s+(?:me|us)|suna[o]|dikha[o]|"
-    r"\u0926\u093f\u0916\u093e|\u0938\u0941\u0928\u093e|\u0a26\u0a71\u0a38",
+    r"\u0926\u093f\u0916\u093e|\u0938\u0941\u0928\u093e|\u092c\u0924\u093e|\u092c\u093e\u0924|"
+    r"\u0a26\u0a71\u0a38|\u0a38\u0a41\u0a23\u0a3e|\u0a17\u0a71\u0a32",
+    re.IGNORECASE,
+)
+_PLACE_POSSESSIVE = re.compile(
+    r"(?:\b(?:ki|ka|ke|di|da|de|mein|me|vich|from|in|of|about)\b|"
+    r"की|का|के|में|दी|ਦਾ|ਦੀ|ਦੇ|ਵਿੱਚ|'ਚ|’ਚ)",
     re.IGNORECASE,
 )
 
@@ -248,8 +255,8 @@ def is_news_ask(text: str) -> bool:
     raw = text or ""
     if _NEWS_NOUN.search(raw):
         return True
-    # Verb alone is not enough unless a known place is in the line.
-    if _NEWS_VERB.search(raw):
+    # Verb or possessive ("मुझे मोगा की", "फिरोजपुर की बात बताओ") + a known place is a news ask.
+    if _NEWS_VERB.search(raw) or _PLACE_POSSESSIVE.search(raw):
         try:
             from .india_places import extract_place
 
@@ -389,84 +396,32 @@ def random_thinking_filler(code: str) -> str:
 
 
 _VIDEO_ASK_PATTERNS = re.compile(
-    r"\b(video|clip|dikhao|dikhaye|chalao|chala\s*do|play(\s+the)?\s*video|show(\s+the)?\s*video|"
-    r"watch(\s+the)?\s*video|ਵੀਡੀਓ|ਵੀਡੀਓ\s*ਚਲਾਓ|वीडियो|वीडियो\s*दिखाओ|वीडियो\s*चलाओ)\b",
+    r"(?:\b(?:video|clip|dikhao|dikhaye|chalao|chala\s*do|play(?:\s+the)?\s*video|show(?:\s+the)?\s*video|"
+    r"watch(?:\s+the)?\s*video)\b|ਵੀਡੀਓ|ਵੀਡੀਓ\s*ਚਲਾਓ|ਵੀਡੀਓ\s*ਦਿਖਾਓ|वीडियो|वीडियो\s*दिखाओ|वीडियो\s*चलाओ|क्लिप\s*दिखाओ)",
     re.IGNORECASE,
 )
 
 _VIDEO_STOP_PATTERNS = re.compile(
-    r"\b(band\s*kar[od]?|band\s*karo|stop(\s+the)?\s*video|stop\s*clip|skip(\s+the)?\s*video|"
-    r"skip|pause(\s+the)?\s*video|hatao|hata\s*do|video\s*hatao|video\s*band|agla|"
-    r"agli\s*khabar|next\s*news|back\s*to\s*news|vapas\s*news|chalo\s*aage)\b",
+    r"(?:\b(?:stop|close|quit|exit|skip|pause|cancel|end|dismiss|"
+    r"band\s*kar[od]?|band\s*karo|hatao|hata\s*do|roko|rok\s*do|video\s*hatao|video\s*band|agla|"
+    r"agli\s*khabar|next\s*news|back\s*to\s*news|vapas\s*news|chalo\s*aage)\b|"
+    r"बंद\s*करो|बंद\s*कर|रोको|रोक\s*दो|हटाओ|हटा\s*दो|वीडियो\s*बंद|वीडियो\s*हटाओ|अगली\s*खबर|आगे\s*बढ़ो|"
+    r"ਬੰਦ\s*ਕਰੋ|ਬੰਦ\s*ਕਰ|ਰੋਕੋ|ਹਟਾਓ|ਵੀਡੀਓ\s*ਬੰਦ|ਅਗਲੀ\s*ਖ਼ਬਰ)",
     re.IGNORECASE,
 )
 
 
 def is_video_ask(text: str) -> bool:
     """True when user is asking to play/show a video clip."""
-    return bool(_VIDEO_ASK_PATTERNS.search(text or ""))
+    raw = text or ""
+    if is_video_stop_ask(raw):
+        return False
+    return bool(_VIDEO_ASK_PATTERNS.search(raw))
 
 
 def is_video_stop_ask(text: str) -> bool:
     """True when viewer wants to close/skip the currently playing news video."""
     return bool(_VIDEO_STOP_PATTERNS.search(text or ""))
-
-
-_MUSIC_ASK_PATTERNS = re.compile(
-    r"(?:\b(music|gaana|gana|song|songs|geet|sangeet|track|play\s+music|play\s+song|"
-    r"gaana\s+bajao|gana\s+bajao|music\s+bajao|music\s+chalao|gaana\s+chalao|gana\s+chalao|"
-    r"koi\s+song|koi\s+gaana|koi\s+gana|koi\s+music|lofi|lo-fi)\b|"
-    r"(?:ਸੰਗੀਤ|ਗਾਣਾ|ਗਾਣੇ|ਗੀਤ|ਸੰਗੀਤ|ਗਾਣਿਆਂ|संगीत|गाना|गाने|गीत))",
-    re.IGNORECASE,
-)
-
-_MUSIC_CHANGE_PATTERNS = re.compile(
-    r"(?:\b(change\s*song|song\s*change|next\s*song|dusra\s*gaana|doosra\s*gaana|dusra\s*gana|doosra\s*gana|"
-    r"agla\s*gaana|agla\s*gana|change\s*music|music\s*change|change\s*karo|badlo|"
-    r"gaana\s*badlo|gana\s*badlo|koi\s*aur\s*gaana|koi\s*aur\s*gana|koi\s*aur\s*song|hor\s*gaana)\b|"
-    r"(?:ਦੂਜਾ\s*ਗਾਣਾ|ਦੂਸਰਾ\s*ਗਾਣਾ|ਅਗਲਾ\s*ਗਾਣਾ|दूसरा\s*गाना|अगला\s*गाना|ਗਾਣਾ\s*ਬਦਲੋ|ਗਾਣਾ\s*ਬਦਲ|ਗਾਣੇ\s*ਬਦਲੋ|गाना\s*बदलो|गाना\s*बदल))",
-    re.IGNORECASE,
-)
-
-_NEWS_CHOICE_PATTERNS = re.compile(
-    r"(?:\b(news|khabar|khabrein|samachar|bulletin|news\s*chalao|news\s*continue|continue\s*news|"
-    r"news\s*sunao|khabar\s*sunao|khabrein\s*sunao|aaj\s*ki\s*khabar|aaj\s*ka\s*samachar|"
-    r"wapas\s*news|vapas\s*news|shuru\s*karo|khabran)\b|"
-    r"(?:ਖ਼ਬਰਾਂ|ਖਬਰਾਂ|ਖ਼ਬਰ|ਖਬਰ|ਸਮਾਚਾਰ|ਬੁਲੇਟਿਨ|ख़बरें|खबरें|ख़बर|खबर|समाचार|बुलेटिन|न्यूज़|न्यूज))",
-    re.IGNORECASE,
-)
-
-
-def is_music_ask(text: str) -> bool:
-    """True when user is asking to play music or a song."""
-    return bool(_MUSIC_ASK_PATTERNS.search(text or ""))
-
-
-def is_music_change_ask(text: str) -> bool:
-    """True when user wants to change/switch to another song."""
-    return bool(_MUSIC_CHANGE_PATTERNS.search(text or ""))
-
-
-def is_news_choice_ask(text: str) -> bool:
-    """True when user chooses or wants to continue news bulletin."""
-    return bool(_NEWS_CHOICE_PATTERNS.search(text or ""))
-
-
-def extract_music_query(text: str) -> str:
-    """Extract clean song/artist query from user utterance like 'Arijit Singh ka gana bajao'."""
-    raw = (text or "").strip()
-    cleaned = re.sub(
-        r"\b(can\s+you|could\s+you|please|i\s+want\s+to\s+listen\s+to|listen\s+to|"
-        r"play(\s+the)?|play|music|song|songs|track|gaana|gana|geet|sangeet|"
-        r"bajao|baja\s+do|chalao|chala\s+do|sunao|suna\s+do|lagao|laga\s+do|karo|kar\s+do|kijiye|"
-        r"ka|ki|ke|ko|se|me|mein|da|di|de|of|for|on|about|wali|wala|koi|kuch|ek)\b|"
-        r"(?:गाने|गाना|गीत|संगीत|बजाओ|बजा\s+दो|चलाओ|चला\s+दो|सुनाओ|ਸੁਣਾਓ|ਗਾਣਾ|ਗਾਣੇ|ਗੀਤ|ਚਲਾਓ|ਬਜਾਓ|ਕਰੋ|ਕਰ\s+ਦੋ|ਦਾ|ਦੀ|ਦੇ)",
-        " ",
-        raw,
-        flags=re.IGNORECASE,
-    )
-    cleaned = " ".join(cleaned.split()).strip()
-    return cleaned if len(cleaned) >= 2 else raw
 
 
 def is_language_switch_only(text: str) -> bool:

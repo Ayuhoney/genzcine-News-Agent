@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import re
@@ -204,7 +205,8 @@ def _article(
 
 
 def _strip_html(text: str) -> str:
-    return re.sub(r"<[^>]+>", "", text or "").strip()
+    cleaned = html.unescape(re.sub(r"<[^>]+>", " ", text or ""))
+    return " ".join(cleaned.split())
 
 
 async def _fetch_newsdata(
@@ -284,7 +286,7 @@ def _parse_google_rss(
 
     articles: list[dict[str, Any]] = []
     for item in root.findall(".//item")[:limit]:
-        title = (item.findtext("title") or "").strip()
+        title = _strip_html(item.findtext("title") or "")
         if not title:
             continue
         link = (item.findtext("link") or "").strip()
@@ -296,6 +298,14 @@ def _parse_google_rss(
             if source_el is not None
             else default_source
         )
+        if source:
+            suffix_rx = re.compile(rf"\s+[-–—|]\s+{re.escape(source)}\s*$", re.I)
+            title = suffix_rx.sub("", title).strip()
+            description = re.sub(rf"(?:\s+[-–—|])?\s*{re.escape(source)}\s*$", "", description, flags=re.I).strip()
+        norm_t = _norm_title(title)
+        norm_d = _norm_title(description)
+        if not norm_d or norm_d == norm_t or (norm_d in norm_t) or (norm_t in norm_d and len(description) <= len(title) + 25):
+            description = ""
         articles.append(
             _article(
                 title=title,
@@ -314,25 +324,28 @@ async def _fetch_google_rss(
     language: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    queries = []
+    queries: list[Optional[str]] = []
     if query:
-        if "news" not in query.lower():
-            queries.append(f"{query} news")
-        queries.append(query)
+        q_clean = query.strip()
+        base_q = f"{q_clean} news" if "news" not in q_clean.lower() else q_clean
+        if "when:" not in base_q.lower():
+            queries.append(f"{base_q} when:7d")
+        queries.append(base_q)
     else:
         queries.append(None)
     headers = {"User-Agent": "GenzCineNewsAgent/1.0"}
     try:
-        rss_query = queries[0]
-        url = _google_rss_url(rss_query, language)
-        resp = await _http().get(url, headers=headers)
-        if resp.status_code != 200:
-            logger.warning("google news rss returned %s", resp.status_code)
-            return []
-        articles = _parse_google_rss(resp.text, limit)
-        if articles:
-            logger.info("google news rss: %d headlines (query=%r)", len(articles), query or "")
-        return articles
+        for rss_query in queries:
+            url = _google_rss_url(rss_query, language)
+            resp = await _http().get(url, headers=headers)
+            if resp.status_code != 200:
+                logger.warning("google news rss returned %s", resp.status_code)
+                continue
+            articles = _parse_google_rss(resp.text, limit)
+            if articles:
+                logger.info("google news rss: %d headlines (query=%r)", len(articles), query or "")
+                return articles
+        return []
     except (httpx.RequestError, httpx.HTTPError, ValueError):
         logger.exception("google news rss request failed")
         return []
@@ -744,6 +757,21 @@ async def fetch_latest_news(
             _INFLIGHT.pop(cache_key, None)
 
 
+_WORLD_QUERIES = {
+    "world",
+    "world news",
+    "international",
+    "international news",
+    "global",
+    "global news",
+    "दुनिया",
+    "वर्ल्ड",
+    "अंतरराष्ट्रीय",
+    "ਵਿਸ਼ਵ",
+    "ਦੁਨੀਆ",
+}
+
+
 async def _fetch_latest_news_uncached(
     query: Optional[str],
     language: str,
@@ -752,7 +780,24 @@ async def _fetch_latest_news_uncached(
 ) -> list[dict[str, Any]]:
     stale = _get_stale_articles(cache_key)
     city = (query or "").strip()
-    paper_q = _preferred_paper_query(query)
+    is_world = city.lower() in _WORLD_QUERIES
+    paper_q = _preferred_paper_query(None if is_world else query)
+
+    if is_world:
+        rss_world, global_wire = await _wait_sources(
+            _fetch_google_rss("world international news", language, max(limit * 2, 6)),
+            _fetch_global_newsdata(language, limit),
+            timeout=_FETCH_DEADLINE_SEC,
+        )
+        rss_clean = [a for a in rss_world if not _is_junk_title(str(a.get("title") or ""))]
+        wire_clean = [a for a in global_wire if not _is_junk_title(str(a.get("title") or ""))]
+        articles = _merge_articles(rss_clean, wire_clean, limit=limit)
+        if articles:
+            _store_cache(cache_key, articles)
+            return articles[:limit]
+        if stale:
+            return stale[:limit]
+        return []
 
     if city:
         # Fast path + early exit once we have enough RSS/published hits.
@@ -764,11 +809,12 @@ async def _fetch_latest_news_uncached(
             enough=max(limit, 3),
         )
         official: list[dict[str, Any]] = []
-        global_wire: list[dict[str, Any]] = []
+        global_wire = []
     else:
-        published, rss, rss_papers, official, global_wire = await _wait_sources(
-            _fetch_published_news(query, limit),
-            _fetch_google_rss(query, language, limit),
+        # Starting / national bulletin: only normal breaking news (no local/community posts).
+        published = []
+        rss, rss_papers, official, global_wire = await _wait_sources(
+            _fetch_google_rss(None, language, limit),
             _fetch_google_rss(paper_q, language, limit),
             _fetch_official_paper_rss(limit),
             _fetch_global_newsdata(language, limit),
@@ -807,10 +853,9 @@ async def _fetch_latest_news_uncached(
     if city:
         local = _mix_buckets(app_local, rss, official, limit=max(limit, 6))
         world = _merge_articles(global_wire, limit=2)
+        articles = _mix_buckets(reporters, local, world, limit=limit)
     else:
-        local = _merge_articles(app_local, limit=max(limit, 6))
-        world = _merge_articles(official, rss, global_wire, limit=max(limit, 6))
-    articles = _mix_buckets(reporters, local, world, limit=limit)
+        articles = _mix_buckets(rss, official, global_wire, limit=limit)
 
     if articles:
         _store_cache(cache_key, articles)

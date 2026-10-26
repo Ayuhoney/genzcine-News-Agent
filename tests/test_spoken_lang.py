@@ -197,15 +197,13 @@ def test_intro_segments_use_native_scripts() -> None:
     from local_voice_ai.agent import _tv_open_segments
 
     segs = _tv_open_segments("TINA", None)
-    assert [c for c, _ in segs] == ["hi", "pa", "en"]
+    assert [c for c, _ in segs] == ["hi", "en"]
     assert tts_lang_for_text(segs[0][1], "en") == "hi"
-    assert tts_lang_for_text(segs[1][1], "en") == "pa"
-    assert tts_lang_for_text(segs[2][1], "en") == "en"
+    assert tts_lang_for_text(segs[1][1], "en") == "en"
     assert "\u0928\u092e\u0938\u094d\u0924\u0947" in segs[0][1]
-    assert "\u0a38\u0a24 \u0a38\u0a4d\u0a30\u0a40 \u0a05\u0a15\u0a3e\u0a32" in segs[1][1]
     named = _tv_open_segments("TINA", "Ayush")
-    assert named[0][1] == segs[0][1] and named[1][1] == segs[1][1]
-    assert "Ayush" in named[2][1]
+    assert named[0][1] == segs[0][1]
+    assert "Ayush" in named[1][1]
 
 
 def test_whisper_label_alone_needs_enough_words() -> None:

@@ -653,7 +653,7 @@ def build_app(cfg: Config) -> FastAPI:
     # ── YouTube HTTPS Embed Bridge (fixes iOS custom scheme Referer rejection) ──
     _YT_VID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
 
-    @app.get("/api/youtube/embed/{video_id}", response_class=HTMLResponse)
+    @app.api_route("/api/youtube/embed/{video_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
     async def youtube_embed_bridge(video_id: str, request: Request) -> HTMLResponse:
         vid = video_id.strip()
         if not _YT_VID_RE.match(vid):

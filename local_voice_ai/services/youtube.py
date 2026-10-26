@@ -9,6 +9,7 @@ ever fetches metadata, never video/audio data.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import re
@@ -170,9 +171,9 @@ async def search_news_video(query: str, language: str = "") -> Optional[VideoRes
         )
         res: VideoResult = {
             "video_id": str(video_id),
-            "title": str(title),
+            "title": html.unescape(str(title)).strip(),
             "thumbnail_url": str(thumb),
-            "channel_title": str(snippet.get("channelTitle") or ""),
+            "channel_title": html.unescape(str(snippet.get("channelTitle") or "")).strip(),
         }
         _VIDEO_CACHE[cache_key] = (time.time(), res)
         if not fut.done():
@@ -187,136 +188,3 @@ async def search_news_video(query: str, language: str = "") -> Optional[VideoRes
         if _VIDEO_INFLIGHT.get(cache_key) is fut:
             _VIDEO_INFLIGHT.pop(cache_key, None)
 
-
-_MUSIC_LABELS = (
-    "t-series", "sony music", "zee music", "tips official", "speed records",
-    "yrf", "saregama", "aditya music", "geet mp3", "white hill music",
-    "desimusicfactory", "vyrloriginals", "jjust music", "svf", "lahari music",
-)
-
-
-async def search_music_video(query: str, language: str = "") -> Optional[VideoResult]:
-    """Search for the best playable music video/audio track on YouTube."""
-    api_key = os.getenv("YOUTUBE_API_KEY", "")
-    if not api_key:
-        logger.warning("YOUTUBE_API_KEY not set — cannot search YouTube music")
-        return None
-
-    clean_q = (query or "").strip()
-    generic_music_terms = {
-        "", "music", "song", "songs", "gaana", "gana", "music chalao",
-        "gaana bajao", "koi song", "koi gaana", "geet", "sangeet",
-    }
-    lowered = clean_q.lower()
-    if lowered in generic_music_terms or len(clean_q) < 3:
-        clean_q = "trending hit songs 2025 bollywood punjabi"
-    elif not any(w in lowered for w in ("song", "music", "gaana", "gana", "geet", "track", "audio")):
-        clean_q = f"{clean_q} song"
-
-    lang_code = (language or "").split("-")[0].lower()
-    cache_key = f"music:{clean_q.lower()}:{lang_code}"
-
-    cached = _VIDEO_CACHE.get(cache_key)
-    if cached and (time.time() - cached[0]) < _VIDEO_CACHE_TTL:
-        logger.info("YouTube music cache hit for %r -> %s", clean_q, cached[1]["video_id"])
-        return cached[1]
-
-    existing = _VIDEO_INFLIGHT.get(cache_key)
-    if existing is not None and not existing.done():
-        try:
-            return await existing
-        except Exception:
-            pass
-
-    loop = asyncio.get_running_loop()
-    fut: asyncio.Future = loop.create_future()
-    _VIDEO_INFLIGHT[cache_key] = fut
-
-    try:
-        params: dict[str, str] = {
-            "part": "snippet",
-            "q": clean_q,
-            "type": "video",
-            "videoCategoryId": "10",
-            "order": "relevance",
-            "maxResults": "7",
-            "safeSearch": "strict",
-            "videoEmbeddable": "true",
-            "videoSyndicated": "true",
-            "key": api_key,
-        }
-        if lang_code in ("hi", "pa", "bn", "ta", "te", "mr", "gu", "en"):
-            params["relevanceLanguage"] = lang_code
-
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(YOUTUBE_SEARCH_URL, params=params)
-            payload = resp.json() if resp.status_code == 200 else {}
-            items = payload.get("items") or []
-
-            # If category 10 search returns empty, fall back to open search
-            if not items:
-                params.pop("videoCategoryId", None)
-                resp = await client.get(YOUTUBE_SEARCH_URL, params=params)
-                if resp.status_code == 200:
-                    payload = resp.json()
-                    items = payload.get("items") or []
-
-            if not items:
-                if not fut.done():
-                    fut.set_result(None)
-                return None
-
-            playable_items: list[dict[str, Any]] = []
-            for item in items:
-                vid = (item.get("id") or {}).get("videoId")
-                if not vid:
-                    continue
-                if await _is_embed_playable(client, str(vid)):
-                    playable_items.append(item)
-
-            if not playable_items:
-                chosen = items[0]
-            else:
-                chosen = None
-                for candidate in playable_items:
-                    snippet = candidate.get("snippet") or {}
-                    chan = str(snippet.get("channelTitle") or "").lower()
-                    if any(lab in chan for lab in _MUSIC_LABELS):
-                        chosen = candidate
-                        break
-                if chosen is None:
-                    chosen = playable_items[0]
-
-            video_id = (chosen.get("id") or {}).get("videoId")
-            if not video_id:
-                if not fut.done():
-                    fut.set_result(None)
-                return None
-
-            snippet = chosen.get("snippet") or {}
-            title = snippet.get("title") or clean_q
-            thumbs = snippet.get("thumbnails") or {}
-            thumb = (
-                (thumbs.get("high") or {}).get("url")
-                or (thumbs.get("medium") or {}).get("url")
-                or (thumbs.get("default") or {}).get("url")
-                or ""
-            )
-            res: VideoResult = {
-                "video_id": str(video_id),
-                "title": str(title),
-                "thumbnail_url": str(thumb),
-                "channel_title": str(snippet.get("channelTitle") or ""),
-            }
-            _VIDEO_CACHE[cache_key] = (time.time(), res)
-            if not fut.done():
-                fut.set_result(res)
-            return res
-    except Exception as exc:
-        logger.exception("YouTube music search error: %s", exc)
-        if not fut.done():
-            fut.set_result(None)
-        return None
-    finally:
-        if _VIDEO_INFLIGHT.get(cache_key) is fut:
-            _VIDEO_INFLIGHT.pop(cache_key, None)

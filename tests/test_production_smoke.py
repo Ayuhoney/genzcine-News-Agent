@@ -116,8 +116,8 @@ async def test_prod_full_viewer_session_smoke(agent: Assistant) -> None:
     )
     assert names == ["Ayush"]
     segs = _tv_open_segments("NOVA", names[0])
-    assert [c for c, _ in segs] == ["hi", "pa", "en"]
-    assert "Ayush" in segs[2][1]
+    assert [c for c, _ in segs] == ["hi", "en"]
+    assert "Ayush" in segs[1][1]
 
     spoken_codes: list[str] = []
 
