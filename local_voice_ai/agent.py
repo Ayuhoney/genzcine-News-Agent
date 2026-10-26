@@ -841,20 +841,6 @@ class Assistant(Agent):
             }
         )
 
-        # Smart Session Pre-Matcher: silently resolve video for top active stories in background
-        async def _prematch() -> None:
-            for art in articles[:2]:
-                title = str(art.get("title") or "").strip()
-                if title and "_video_result" not in art:
-                    try:
-                        res = await search_news_video(title, language=self._language)
-                        if res:
-                            art["_video_result"] = res
-                    except Exception:
-                        pass
-
-        asyncio.create_task(_prematch())
-
     async def _publish_headline_now(self) -> None:
         if not self._last_headlines:
             return
@@ -1176,6 +1162,10 @@ class Assistant(Agent):
                 {"type": "video_error", "topic": search_topic, "message": "video_not_found"}
             )
             return f"Could not find a video for '{search_topic}' — continue reporting verbally."
+
+        if self._last_headlines:
+            idx = self._active_headline_index % len(self._last_headlines)
+            self._last_headlines[idx]["_video_result"] = result
         video_id = result["video_id"]
         video_title = result["title"]
         thumbnail = result.get("thumbnail_url", "")

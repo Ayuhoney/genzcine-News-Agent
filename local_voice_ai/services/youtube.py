@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import os
+from pathlib import Path
 import re
 import time
 from typing import Any, Optional, TypedDict
@@ -23,9 +25,70 @@ logger = logging.getLogger("youtube")
 YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 EMBED_REFERER = "https://news.200.234.41.50.sslip.io/"
 
-_VIDEO_CACHE_TTL = 12 * 3600  # 12 hours cache
+_VIDEO_CACHE_TTL = 24 * 3600  # 24 hours persistent cache
 _VIDEO_CACHE: dict[str, tuple[float, VideoResult]] = {}
 _VIDEO_INFLIGHT: dict[str, asyncio.Future] = {}
+_QUOTA_EXCEEDED_UNTIL: float = 0.0
+
+
+def _get_cache_file() -> Path:
+    env_path = os.getenv("YOUTUBE_CACHE_FILE")
+    if env_path:
+        return Path(env_path)
+    if Path("/models").is_dir():
+        return Path("/models/video_cache.json")
+    repo_data = Path(__file__).resolve().parent.parent.parent / "data"
+    repo_data.mkdir(parents=True, exist_ok=True)
+    return repo_data / "video_cache.json"
+
+
+def _load_disk_cache() -> None:
+    try:
+        path = _get_cache_file()
+        if not path.is_file():
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        now = time.time()
+        count = 0
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if isinstance(v, list) and len(v) == 2:
+                    ts, res = v
+                    if (now - float(ts)) < _VIDEO_CACHE_TTL and isinstance(res, dict) and "video_id" in res:
+                        _VIDEO_CACHE[k] = (float(ts), res)
+                        count += 1
+                elif isinstance(v, dict) and "timestamp" in v and "result" in v:
+                    ts = v["timestamp"]
+                    res = v["result"]
+                    if (now - float(ts)) < _VIDEO_CACHE_TTL and isinstance(res, dict) and "video_id" in res:
+                        _VIDEO_CACHE[k] = (float(ts), res)
+                        count += 1
+        logger.info("Loaded %d cached YouTube videos from %s", count, path)
+    except Exception as exc:
+        logger.warning("Failed to load video cache from disk: %s", exc)
+
+
+def _save_disk_cache() -> None:
+    try:
+        path = _get_cache_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        items = dict(_VIDEO_CACHE)
+        data = {
+            k: [ts, res]
+            for k, (ts, res) in items.items()
+            if (now - ts) < _VIDEO_CACHE_TTL
+        }
+        tmp_path = path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp_path.replace(path)
+    except Exception as exc:
+        logger.warning("Failed to save video cache to disk: %s", exc)
+
+
+_load_disk_cache()
 
 
 class VideoResult(TypedDict):
@@ -135,7 +198,7 @@ async def search_news_video(query: str, language: str = "") -> Optional[VideoRes
     lang_code = (language or "").split("-")[0].lower()
     cache_key = f"{clean_q.lower()}:{lang_code}"
     
-    # 1. Check in-memory 12h cache
+    # 1. Check in-memory / persistent cache
     cached = _VIDEO_CACHE.get(cache_key)
     if cached and (time.time() - cached[0]) < _VIDEO_CACHE_TTL:
         logger.info("YouTube video cache hit for %r -> %s", clean_q, cached[1]["video_id"])
@@ -148,6 +211,15 @@ async def search_news_video(query: str, language: str = "") -> Optional[VideoRes
             return await existing
         except Exception:
             pass
+
+    global _QUOTA_EXCEEDED_UNTIL
+    if time.time() < _QUOTA_EXCEEDED_UNTIL:
+        logger.info(
+            "YouTube quota currently throttled (until +%0.0fs) — serving fallback instantly",
+            _QUOTA_EXCEEDED_UNTIL - time.time(),
+        )
+        fb = _fallback_video(clean_q)
+        return fb
 
     loop = asyncio.get_running_loop()
     fut: asyncio.Future = loop.create_future()
@@ -171,15 +243,32 @@ async def search_news_video(query: str, language: str = "") -> Optional[VideoRes
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(YOUTUBE_SEARCH_URL, params=params)
             if resp.status_code != 200:
-                logger.warning("YouTube API returned %s: %s — using verified news fallback", resp.status_code, resp.text[:200])
+                resp_text = resp.text
+                if resp.status_code in (403, 429) or "quotaExceeded" in resp_text:
+                    _QUOTA_EXCEEDED_UNTIL = time.time() + 1800
+                    logger.warning(
+                        "YouTube quota exceeded (status %s) — throttled for 30m; serving fallback",
+                        resp.status_code,
+                    )
+                else:
+                    logger.warning(
+                        "YouTube API returned %s: %s — using verified news fallback",
+                        resp.status_code,
+                        resp_text[:200],
+                    )
                 fb = _fallback_video(clean_q)
+                _VIDEO_CACHE[cache_key] = (time.time(), fb)
+                _save_disk_cache()
                 if not fut.done():
                     fut.set_result(fb)
                 return fb
+
             payload: dict[str, Any] = resp.json()
             items = payload.get("items") or []
             if not items:
                 fb = _fallback_video(clean_q)
+                _VIDEO_CACHE[cache_key] = (time.time(), fb)
+                _save_disk_cache()
                 if not fut.done():
                     fut.set_result(fb)
                 return fb
@@ -213,9 +302,13 @@ async def search_news_video(query: str, language: str = "") -> Optional[VideoRes
 
         video_id = (chosen.get("id") or {}).get("videoId")
         if not video_id:
+            fb = _fallback_video(clean_q)
+            _VIDEO_CACHE[cache_key] = (time.time(), fb)
+            _save_disk_cache()
             if not fut.done():
-                fut.set_result(None)
-            return None
+                fut.set_result(fb)
+            return fb
+
         snippet = chosen.get("snippet") or {}
         title = snippet.get("title") or query
         thumbs = snippet.get("thumbnails") or {}
@@ -232,12 +325,15 @@ async def search_news_video(query: str, language: str = "") -> Optional[VideoRes
             "channel_title": html.unescape(str(snippet.get("channelTitle") or "")).strip(),
         }
         _VIDEO_CACHE[cache_key] = (time.time(), res)
+        _save_disk_cache()
         if not fut.done():
             fut.set_result(res)
         return res
     except (httpx.RequestError, httpx.HTTPError, ValueError) as exc:
         logger.exception("YouTube API request failed — using verified news fallback")
         fb = _fallback_video(query)
+        _VIDEO_CACHE[cache_key] = (time.time(), fb)
+        _save_disk_cache()
         if not fut.done():
             fut.set_result(fb)
         return fb
