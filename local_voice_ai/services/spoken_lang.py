@@ -403,6 +403,7 @@ _VIDEO_ASK_PATTERNS = re.compile(
 
 _VIDEO_STOP_PATTERNS = re.compile(
     r"(?:\b(?:stop|close|quit|exit|skip|pause|cancel|end|dismiss|"
+    r"playing\s+this\s+video|stop\s+playing|close\s+this\s+video|"
     r"band\s*kar[od]?|band\s*karo|hatao|hata\s*do|roko|rok\s*do|video\s*hatao|video\s*band|agla|"
     r"agli\s*khabar|next\s*news|back\s*to\s*news|vapas\s*news|chalo\s*aage)\b|"
     r"बंद\s*करो|बंद\s*कर|रोको|रोक\s*दो|हटाओ|हटा\s*दो|वीडियो\s*बंद|वीडियो\s*हटाओ|अगली\s*खबर|आगे\s*बढ़ो|"

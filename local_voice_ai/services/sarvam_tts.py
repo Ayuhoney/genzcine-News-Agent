@@ -38,8 +38,17 @@ _SAMPLE_RATE = 24000
 
 _SENT_END = re.compile(r"(?<=[.!?\u0964\u061f])[\"'\u201d\u2019)]?\s+")
 _ABBREV = re.compile(r"\b(?:Dr|Mr|Mrs|Ms|St|No|Rs|vs|Lt|Gen|Col)\.$", re.IGNORECASE)
+_PAUSE_PUNCT_RE = re.compile(r"\s*(?:[\u2014\u2013]+|\u2026|\.{2,})\s*")
 _MIN_SENTENCE_CHARS = 28
 _PREFETCH = 2
+
+
+def _smooth_tts_text(text: str) -> str:
+    """Replace em-dashes and ellipses that cause 1s+ pauses in Bulbul v3 with a light comma."""
+    cleaned = _PAUSE_PUNCT_RE.sub(", ", (text or "").strip())
+    cleaned = re.sub(r",\s*,+", ", ", cleaned)
+    cleaned = re.sub(r"([.!?])\s*,\s*", r"\1 ", cleaned)
+    return cleaned.strip(" ,")
 
 
 def split_complete_sentences(buffer: str) -> tuple[list[str], str]:
@@ -164,7 +173,7 @@ class SarvamTTS(tts.TTS):
 
     async def prewarm_sentence(self, text: str, language: str) -> None:
         """Fetch and cache a single sentence in the background if not already cached."""
-        clean = (text or "").strip()
+        clean = _smooth_tts_text(text)
         if not clean or not self._cache.cacheable(clean):
             return
         lang_key = language if language in SARVAM_TTS_CODE else "en"
@@ -246,7 +255,7 @@ class _SarvamChunkedStream(tts.ChunkedStream):
         return await self._tts._client.send(req, stream=True)
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
-        text = (self.input_text or "").strip()
+        text = _smooth_tts_text(self.input_text or "")
         language = self._language
         lang = SARVAM_TTS_CODE.get(language, "en-IN")
         output_emitter.initialize(
@@ -368,7 +377,7 @@ class LanguageRoutedTTS(tts.TTS):
         lang = self._lang_for(text)
         return self._sarvam.synthesize(text, conn_options=conn_options, language=lang)
 
-    async def prewarm(self, text: str, spoken_lang: str | None = None) -> None:
+    async def prewarm_line(self, text: str, spoken_lang: str | None = None) -> None:
         """Pre-synthesize all sentences of a line into the PCM disk cache."""
         clean = (text or "").strip()
         if not clean:
@@ -437,6 +446,10 @@ class _SarvamSynthesizeStream(tts.SynthesizeStream):
                     continue
                 buffer += data if isinstance(data, str) else str(data)
                 done, buffer = split_complete_sentences(buffer)
+                # Keep the last complete sentence in buffer if the remaining tail is tiny (< 24 chars)
+                # so short trailing fragments don't become a separate 4-char TTS request.
+                if done and 0 < len(buffer.strip()) < 24:
+                    buffer = f"{done.pop()} {buffer.lstrip()}"
                 for sentence in done:
                     await _enqueue(sentence)
             tail = buffer.strip()

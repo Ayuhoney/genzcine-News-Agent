@@ -285,9 +285,9 @@ def _parse_google_rss(
         return []
 
     articles: list[dict[str, Any]] = []
-    for item in root.findall(".//item")[:limit]:
+    for item in root.findall(".//item"):
         title = _strip_html(item.findtext("title") or "")
-        if not title:
+        if not title or _is_junk_title(title):
             continue
         link = (item.findtext("link") or "").strip()
         pub_date = (item.findtext("pubDate") or "").strip()
@@ -316,6 +316,8 @@ def _parse_google_rss(
                 provider="google_rss",
             )
         )
+        if len(articles) >= max(limit * 2, 8):
+            break
     return articles
 
 
@@ -803,10 +805,10 @@ async def _fetch_latest_news_uncached(
         # Fast path + early exit once we have enough RSS/published hits.
         published, rss, rss_papers = await _wait_sources_early(
             _fetch_published_news(query, limit),
-            _fetch_google_rss(query, language, limit),
-            _fetch_google_rss(paper_q, language, limit),
+            _fetch_google_rss(query, language, max(limit, 5)),
+            _fetch_google_rss(paper_q, language, max(limit, 5)),
             timeout=_FETCH_DEADLINE_SEC,
-            enough=max(limit, 3),
+            enough=max(limit * 2, 8),
         )
         official: list[dict[str, Any]] = []
         global_wire = []
@@ -826,9 +828,9 @@ async def _fetch_latest_news_uncached(
     if city:
         rss_hit = [a for a in rss_scoped if _mentions_query(a, city)]
         # Google often returns state/regional hits for small cities — keep the
-        # query-scoped RSS rather than returning empty and going mute.
+        # query-scoped RSS rather than returning empty or only 1 story.
         if rss_hit:
-            rss = rss_hit
+            rss = _merge_articles(rss_hit, rss_scoped, limit=max(limit * 2, 8))
         elif rss_scoped:
             logger.info("city mention filter empty — using query-scoped RSS (%s)", city)
             rss = rss_scoped

@@ -447,12 +447,17 @@ _BUSY_FALLBACK = (
 )
 
 
-def _trim_description(text: str, *, limit: int = 520) -> str:
+def _trim_description(text: str, *, limit: int = 460) -> str:
     clean = (text or "").strip()
     if len(clean) <= limit:
         return clean
-    cut = clean[: limit - 3].rsplit(" ", 1)[0]
-    return f"{cut}..."
+    window = clean[:limit]
+    for sep in (". ", "। ", "! ", "? "):
+        idx = window.rfind(sep)
+        if idx >= limit // 2:
+            return window[: idx + 1].strip()
+    cut = window.rsplit(" ", 1)[0].rstrip(".,;:-—–")
+    return f"{cut}."
 
 
 def _tv_open_segments(anchor_name: str, viewer_name: str | None, language: str = "en") -> list[tuple[str, str]]:
@@ -461,13 +466,13 @@ def _tv_open_segments(anchor_name: str, viewer_name: str | None, language: str =
     if spoken == "hi":
         greet = f"नमस्ते {viewer_name} जी," if viewer_name else "नमस्ते,"
         text = (
-            f"{greet} {brand_spoken('hi')} पर आपका स्वागत है — "
-            f"मैं हूँ {anchor_name}, न्यूज़ रूम से लाइव, आइए शुरू करते हैं आज की बड़ी खबरें।"
+            f"{greet} {brand_spoken('hi')} पर आपका स्वागत है, "
+            f"मैं हूँ {anchor_name} न्यूज़ रूम से लाइव, आइए शुरू करते हैं आज की बड़ी खबरें।"
         )
         return [("hi", text)]
-    welcome = f"Namaste {viewer_name}, and welcome" if viewer_name else "Namaste, and welcome"
+    welcome = f"Namaste {viewer_name} and welcome" if viewer_name else "Namaste and welcome"
     text = (
-        f"{welcome} to {brand_spoken('en')} — I'm {anchor_name}, "
+        f"{welcome} to {brand_spoken('en')}, I'm {anchor_name} "
         "live from the newsroom with today's top headlines."
     )
     return [("en", text)]
@@ -663,6 +668,8 @@ class Assistant(Agent):
         self._silence_filler_spoken = False
         self._filler_speaking = False
         self._pending_lang_commit = False
+        self._on_turn_started_cb: Any = None
+        self._on_video_stop_cb: Any = None
 
         super().__init__(instructions=self._instructions_text())
 
@@ -686,6 +693,11 @@ class Assistant(Agent):
         - "Hindi me bolo" alone → spoken confirm, no LLM call.
         - History capped so prompt size stays flat over a long session.
         """
+        if self._on_turn_started_cb is not None:
+            try:
+                self._on_turn_started_cb()
+            except Exception:
+                pass
         self._silence_filler_spoken = False
         self._filler_speaking = False
 
@@ -742,19 +754,12 @@ class Assistant(Agent):
         video_ask = is_video_ask(text) and not video_stop
         if video_stop:
             logger.info("video stop ask detected in user turn: %r", text[:80])
-            self._video_playing = False
-            if self._room is not None:
-                stop_evt = {"type": "video_end", "topic": self._video_topic or "the clip", "skipped": True}
+            topic = self._video_topic or "the clip"
+            if self._on_video_stop_cb is not None and self._video_playing:
                 try:
-                    await self._room.local_participant.publish_data(
-                        json.dumps(stop_evt).encode(), reliable=True, topic="news_video"
-                    )
+                    self._on_video_stop_cb(topic)
                 except Exception:
-                    pass
-                await self._publish_studio(stop_evt)
-                await self._publish_studio(
-                    {"type": "studio_state", "mode": "live", "anchorName": self._anchor_name}
-                )
+                    logger.exception("_on_video_stop_cb failed")
             if not news_ask:
                 raise StopResponse()
         if news_ask or switched:
@@ -854,6 +859,12 @@ class Assistant(Agent):
         if not self._last_headlines:
             return
         idx = self._headline_index % len(self._last_headlines)
+        await self._publish_headline_now_at(idx)
+
+    async def _publish_headline_now_at(self, idx: int) -> None:
+        if not self._last_headlines:
+            return
+        idx = idx % len(self._last_headlines)
         self._active_headline_index = idx
         article = headline_article(self._last_headlines[idx], index=idx)
         await self._publish_studio(
@@ -869,7 +880,7 @@ class Assistant(Agent):
     async def _prewarm_headline_tts(self, index: int, *, is_first: bool = False) -> None:
         """Pre-synthesize a headline into the disk cache so playout starts with zero gap."""
         router = self._tts_router
-        if router is None or not hasattr(router, "prewarm") or not self._last_headlines:
+        if router is None or not hasattr(router, "prewarm_line") or not self._last_headlines:
             return
         try:
             idx = index % len(self._last_headlines)
@@ -882,11 +893,11 @@ class Assistant(Agent):
             )
             spoken = self._spoken_code()
             if bridge and spoken != "en" and not has_sarvam_script(body, spoken):
-                await router.prewarm(bridge, spoken)
+                await router.prewarm_line(bridge, spoken)
                 if body:
-                    await router.prewarm(body, "en")
+                    await router.prewarm_line(body, "en")
             else:
-                await router.prewarm(f"{bridge} {body}".strip(), spoken)
+                await router.prewarm_line(f"{bridge} {body}".strip(), spoken)
         except Exception:
             pass
 
@@ -907,6 +918,7 @@ class Assistant(Agent):
                 return False
 
         idx = self._headline_index % len(self._last_headlines)
+        self._headline_index = idx + 1
         article = self._last_headlines[idx]
         bridge, body = _headline_spoken_parts(
             article,
@@ -914,7 +926,7 @@ class Assistant(Agent):
             index=idx,
             language=self._language,
         )
-        await self._publish_headline_now()
+        await self._publish_headline_now_at(idx)
         spoken = self._spoken_code()
 
         # Prewarm the next story in the background while this story plays.
@@ -935,7 +947,6 @@ class Assistant(Agent):
                 await self._say_language("en", body)
         else:
             await self._safe_say(f"{bridge} {body}".strip())
-        self._headline_index += 1
         if self._tts_router is not None:
             self._tts_router.set_spoken(spoken)
         return True
@@ -954,6 +965,17 @@ class Assistant(Agent):
         if not line or not self._can_speak():
             return False
         try:
+            act = getattr(self.session, "_activity", None)
+            if act is not None:
+                sil_ev = getattr(act, "_user_silence_event", None)
+                if sil_ev is not None and hasattr(sil_ev, "set"):
+                    sil_ev.set()
+                    if not getattr(sil_ev, "_echo_guarded", False):
+                        sil_ev.clear = lambda: None  # type: ignore[method-assign]
+                        setattr(sil_ev, "_echo_guarded", True)
+                auth_ev = getattr(act, "_authorization_allowed", None)
+                if auth_ev is not None and hasattr(auth_ev, "set"):
+                    auth_ev.set()
             handle = self.session.say(line, allow_interruptions=True, **kwargs)
             if wait:
                 await handle
@@ -1323,7 +1345,11 @@ server = AgentServer()
 
 
 def prewarm(proc: JobProcess) -> None:
-    proc.userdata["vad"] = silero.VAD.load()
+    proc.userdata["vad"] = silero.VAD.load(
+        activation_threshold=0.68,
+        min_speech_duration=0.18,
+        min_silence_duration=0.35,
+    )
 
 
 server.setup_fnc = prewarm
@@ -1389,9 +1415,8 @@ async def my_agent(ctx: JobContext) -> None:
                 "enabled": True,
                 "min_duration": 0.65,
                 "min_words": 2,
-                # Resume speech on brief false interruptions (coughs/noise) now that audio is direct WebRTC
-                "resume_false_interruption": True,
-                "false_interruption_timeout": 1.0,
+                # Disabled: resume_false_interruption pauses audio_output on raw VAD before min_words=2 is checked
+                "resume_false_interruption": False,
             },
             "endpointing": {
                 # Slightly longer window so "Firozpur… ki khabar" stays one turn.
@@ -1633,6 +1658,13 @@ async def my_agent(ctx: JobContext) -> None:
         task = _bc.get("reply_nudge_task")
         if task and not task.done():
             task.cancel()
+        _bc["reply_nudge_task"] = None
+
+    def _on_turn_started() -> None:
+        _cancel_reply_nudge()
+        _bc["agent_responding_to_user"] = True
+
+    agent._on_turn_started_cb = _on_turn_started
 
     def _on_user_input_transcribed(ev) -> None:
         # Bulletin/pause bookkeeping only. Language switch, place correction and
@@ -1663,16 +1695,20 @@ async def my_agent(ctx: JobContext) -> None:
                 agent._opening = False
                 agent._opening_cut = True
 
-            if agent._video_playing and text and is_video_stop_ask(text):
-                logger.info("viewer voice stop video command: %r", text)
-                topic = agent._video_topic or "the clip"
-                asyncio.create_task(_respond_to_video_end(topic, skipped=True))
+            if text and is_video_stop_ask(text) and not is_news_ask(text):
+                if agent._video_playing:
+                    logger.info("viewer voice stop video command: %r", text)
+                    topic = agent._video_topic or "the clip"
+                    asyncio.create_task(_respond_to_video_end(topic, skipped=True))
                 return
             if text:
                 logger.info("mic STT final (whisper=%s): %r", whisper_lang, text[:120])
                 _bc["user_turn_active"] = True
                 _bc["paused"] = True
                 _cancel_conversation_idle()
+                c_task = _bc.get("continue_task")
+                if c_task and not c_task.done():
+                    c_task.cancel()
                 place = extract_place(text)
                 if place:
                     sticky = news_query_for(place) or place
@@ -1695,7 +1731,12 @@ async def my_agent(ctx: JobContext) -> None:
                     item_id=ev.item_id or "",
                 )
             )
-            if text and not is_language_switch_only(text):
+            if (
+                text
+                and not is_language_switch_only(text)
+                and not is_video_ask(text)
+                and not is_video_stop_ask(text)
+            ):
                 # Safety net only — LiveKit's own end-of-turn reply is the main path.
                 _cancel_reply_nudge()
                 _bc["reply_nudge_task"] = asyncio.create_task(_nudge_user_reply(text))
@@ -1785,7 +1826,6 @@ async def my_agent(ctx: JobContext) -> None:
                 or agent._video_playing
                 or agent._opening
                 or not ctx.room.isconnected()
-                or _bc["user_state"] == "speaking"
                 or session.agent_state in ("speaking", "thinking")
             ):
                 return
@@ -2060,15 +2100,17 @@ async def my_agent(ctx: JobContext) -> None:
     def _on_user_state_changed(ev) -> None:
         try:
             _bc["user_state"] = ev.new_state
+            if not _bc["user_turn_active"]:
+                act = getattr(session, "_activity", None)
+                sil_ev = getattr(act, "_user_silence_event", None) if act is not None else None
+                if sil_ev is not None and hasattr(sil_ev, "set"):
+                    sil_ev.set()
             if ev.new_state == "speaking":
                 # Raw VAD fires frequently on mobile loudspeaker echo and slight background noise.
                 # Do NOT call session.interrupt() or set _bc["paused"] = True here — let
                 # LiveKit's min_words=2 interruption and _on_user_input_transcribed handle real speech.
                 _cancel_resume_task()
                 _cancel_conversation_idle()
-                task = _bc.get("continue_task")
-                if task and not task.done():
-                    task.cancel()
             elif ev.new_state == "listening":
                 if _bc["paused"] and _bc["user_turn_active"]:
                     _cancel_resume_task()
@@ -2115,6 +2157,8 @@ async def my_agent(ctx: JobContext) -> None:
 
     async def _respond_to_video_end(topic: str, skipped: bool) -> None:
         try:
+            if not agent._video_playing:
+                return
             agent._video_playing = False
             _cancel_conversation_idle()
             _bc["conversation_mode"] = False
@@ -2147,6 +2191,9 @@ async def my_agent(ctx: JobContext) -> None:
             )
             spoken = agent._spoken_code()
             if skipped:
+                # Let LiveKit finish finalizing the voice turn (on_user_turn_completed -> StopResponse)
+                # before starting TTS so turn-finalization does not interrupt this line.
+                await asyncio.sleep(0.35)
                 line = {
                     "hi": "जी बिल्कुल, चलिए आज की खबरों पर वापस आते हैं।",
                     "pa": "ਜੀ ਬਿਲਕੁਲ, ਚਲੋ ਅੱਜ ਦੀਆਂ ਖ਼ਬਰਾਂ ਵੱਲ ਵਾਪਸ ਆਉਂਦੇ ਹਾਂ।",
@@ -2166,6 +2213,10 @@ async def my_agent(ctx: JobContext) -> None:
             await _handle_agent_error(
                 session, ctx.room, exc, reason="video_end_exception", anchor_name=anchor_name
             )
+
+    agent._on_video_stop_cb = lambda topic: asyncio.create_task(
+        _respond_to_video_end(topic, skipped=True)
+    )
 
     def on_data_received(data_packet: rtc.DataPacket) -> None:
         try:

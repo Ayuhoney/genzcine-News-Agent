@@ -75,73 +75,97 @@ class SarvamWebSocketStream(stt.RecognizeStream):
             "api-subscription-key": self._api_key,
         }
 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60.0)) as ws_session:
-            async with ws_session.ws_connect(url, headers=headers) as ws:
-                logger.info(
-                    "Connected to Sarvam STT streaming WebSocket (model=%s, lang=%s)",
-                    self._model,
-                    self._language,
-                )
+        timeout = aiohttp.ClientTimeout(
+            total=None, connect=10.0, sock_connect=10.0, sock_read=None
+        )
+        input_closed = False
 
-                async def _send_loop() -> None:
-                    try:
-                        async for item in self._input_ch:
-                            if isinstance(item, self._FlushSentinel):
-                                continue
-                            wav = item.to_wav_bytes()
-                            b64 = base64.b64encode(wav).decode("ascii")
-                            payload = {
-                                "audio": {
-                                    "data": b64,
-                                    "sample_rate": self._sample_rate,
-                                    "encoding": "audio/wav",
-                                }
-                            }
-                            await ws.send_json(payload)
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception as exc:
-                        logger.warning("Sarvam STT ws send error: %s", exc)
-
-                async def _recv_loop() -> None:
-                    try:
-                        async for msg in ws:
-                            if msg.type == aiohttp.WSMsgType.TEXT:
-                                try:
-                                    body = json.loads(msg.data)
-                                except Exception:
-                                    continue
-                                data = body.get("data", {}) if body.get("type") == "data" else body
-                                transcript = str(data.get("transcript") or data.get("text") or "").strip()
-                                if transcript:
-                                    lang = str(data.get("language_code") or data.get("language") or self._language)
-                                    req_id = str(data.get("request_id") or uuid.uuid4())
-                                    logger.info("sarvam stt streaming transcript: %r (lang=%s)", transcript[:60], lang)
-                                    self._event_ch.send_nowait(
-                                        stt.SpeechEvent(
-                                            type=stt.SpeechEventType.FINAL_TRANSCRIPT,
-                                            request_id=req_id,
-                                            alternatives=[stt.SpeechData(language=lang, text=transcript)],
-                                        )
-                                    )
-                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                                break
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception as exc:
-                        logger.warning("Sarvam STT ws recv error: %s", exc)
-
-                send_task = asyncio.create_task(_send_loop())
-                recv_task = asyncio.create_task(_recv_loop())
+        async with aiohttp.ClientSession(timeout=timeout) as ws_session:
+            while not input_closed:
                 try:
-                    done, pending = await asyncio.wait(
-                        [send_task, recv_task],
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                finally:
-                    for task in (send_task, recv_task):
-                        if not task.done():
-                            task.cancel()
+                    async with ws_session.ws_connect(
+                        url, headers=headers, heartbeat=20.0
+                    ) as ws:
+                        logger.info(
+                            "Connected to Sarvam STT streaming WebSocket (model=%s, lang=%s)",
+                            self._model,
+                            self._language,
+                        )
+
+                        async def _send_loop() -> None:
+                            nonlocal input_closed
+                            try:
+                                async for item in self._input_ch:
+                                    if isinstance(item, self._FlushSentinel):
+                                        continue
+                                    wav = item.to_wav_bytes()
+                                    b64 = base64.b64encode(wav).decode("ascii")
+                                    payload = {
+                                        "audio": {
+                                            "data": b64,
+                                            "sample_rate": self._sample_rate,
+                                            "encoding": "audio/wav",
+                                        }
+                                    }
+                                    await ws.send_json(payload)
+                                input_closed = True
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as exc:
+                                logger.warning("Sarvam STT ws send error: %s", exc)
+
+                        async def _recv_loop() -> None:
+                            try:
+                                async for msg in ws:
+                                    if msg.type == aiohttp.WSMsgType.TEXT:
+                                        try:
+                                            body = json.loads(msg.data)
+                                        except Exception:
+                                            continue
+                                        data = body.get("data", {}) if body.get("type") == "data" else body
+                                        transcript = str(data.get("transcript") or data.get("text") or "").strip()
+                                        if transcript:
+                                            lang = str(data.get("language_code") or data.get("language") or self._language)
+                                            req_id = str(data.get("request_id") or uuid.uuid4())
+                                            logger.info("sarvam stt streaming transcript: %r (lang=%s)", transcript[:60], lang)
+                                            self._event_ch.send_nowait(
+                                                stt.SpeechEvent(
+                                                    type=stt.SpeechEventType.FINAL_TRANSCRIPT,
+                                                    request_id=req_id,
+                                                    alternatives=[stt.SpeechData(language=lang, text=transcript)],
+                                                )
+                                            )
+                                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                        break
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as exc:
+                                logger.warning("Sarvam STT ws recv error: %s", exc)
+
+                        send_task = asyncio.create_task(_send_loop())
+                        recv_task = asyncio.create_task(_recv_loop())
+                        try:
+                            await asyncio.wait(
+                                [send_task, recv_task],
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                        finally:
+                            for task in (send_task, recv_task):
+                                if not task.done():
+                                    task.cancel()
+                                    try:
+                                        await task
+                                    except (asyncio.CancelledError, Exception):
+                                        pass
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if input_closed:
+                        break
+                    logger.warning("Sarvam STT ws reconnecting after error: %s", exc)
+                    await asyncio.sleep(0.25)
+                if not input_closed:
+                    await asyncio.sleep(0.15)
 
 
 class SarvamSTT(stt.STT):
