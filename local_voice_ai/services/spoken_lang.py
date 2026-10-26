@@ -233,19 +233,21 @@ def is_intro_ack(text: str) -> bool:
 
 _NEWS_NOUN = re.compile(
     r"news|headline|khabar|khabr|\u0916\u092c\u0930|\u0a16\u0a2c\u0a30|\u0a16\u0a3c\u0a2c\u0a30|"
+    r"খবর|সংবাদ|বাতমি|बातमी|बातम्या|செய்தி|செய்திகள்|వార్తలు|సమాచార|સમાચાર|ಸುದ್ದಿ|വാർത്ത|"
     r"bulletin|headlines|\u0938\u092e\u093e\u091a\u093e\u0930|"
     r"\blatest\b|\bupdate(?:s)?\b|ताज़ा|ताजा|लेटेस्ट|अपडेट|दुनिया|वर्ल्ड|\bworld\b",
     re.IGNORECASE,
 )
 _NEWS_VERB = re.compile(
     r"batao|bataiye|tell\s+(?:me|us)|suna[o]|dikha[o]|"
+    r"শোনাও|বলুন|বলো|জানাও|सांगा|சொல்லுங்கள்|చెప్పండి|కహో|કહો|ತಿಳಿಸಿ|"
     r"\u0926\u093f\u0916\u093e|\u0938\u0941\u0928\u093e|\u092c\u0924\u093e|\u092c\u093e\u0924|"
     r"\u0a26\u0a71\u0a38|\u0a38\u0a41\u0a23\u0a3e|\u0a17\u0a71\u0a32",
     re.IGNORECASE,
 )
 _PLACE_POSSESSIVE = re.compile(
     r"(?:\b(?:ki|ka|ke|di|da|de|mein|me|vich|from|in|of|about)\b|"
-    r"की|का|के|में|दी|ਦਾ|ਦੀ|ਦੇ|ਵਿੱਚ|'ਚ|’ਚ)",
+    r"की|का|के|में|दी|ਦਾ|ਦੀ|ਦੇ|ਵਿੱਚ|'ਚ|’ਚ|র|এর|তে|থেকে|ची|चा|चे|च्या|मध्ये|तील|ன்|இல்)",
     re.IGNORECASE,
 )
 

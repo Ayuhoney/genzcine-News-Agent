@@ -35,12 +35,61 @@ class VideoResult(TypedDict):
     channel_title: str
 
 
+_FALLBACK_NEWS_VIDEOS: list[tuple[re.Pattern, VideoResult]] = [
+    (re.compile(r"tech|gadget|business|market|startup", re.I), {
+        "video_id": "hw7lczdv6jg",
+        "title": "Technology & Gadgets Report | BBC News",
+        "thumbnail_url": "https://i.ytimg.com/vi/hw7lczdv6jg/hqdefault.jpg",
+        "channel_title": "BBC News",
+    }),
+    (re.compile(r"up|uttar\s*pradesh|lucknow|varanasi|kanpur|यूपी", re.I), {
+        "video_id": "KQkVHfa0XHw",
+        "title": "UP News Bulletins | Top Ground Updates",
+        "thumbnail_url": "https://i.ytimg.com/vi/KQkVHfa0XHw/hqdefault.jpg",
+        "channel_title": "Zee News",
+    }),
+    (re.compile(r"delhi|ncr|milan\s*garden|दिल्ली", re.I), {
+        "video_id": "O-xqPm_VPUk",
+        "title": "Delhi News Today | Top Ground Updates",
+        "thumbnail_url": "https://i.ytimg.com/vi/O-xqPm_VPUk/hqdefault.jpg",
+        "channel_title": "NDTV",
+    }),
+    (re.compile(r"punjab|chandigarh|amritsar|ludhiana|ਪੰਜਾਬ", re.I), {
+        "video_id": "a_PzqyHtb2Q",
+        "title": "Punjab News Headlines | PTC News",
+        "thumbnail_url": "https://i.ytimg.com/vi/a_PzqyHtb2Q/hqdefault.jpg",
+        "channel_title": "PTC News",
+    }),
+    (re.compile(r"mumbai|maharashtra|pune|मुंबई|महाराष्ट्र", re.I), {
+        "video_id": "omSYrjCtfD8",
+        "title": "Maharashtra & Mumbai News Today",
+        "thumbnail_url": "https://i.ytimg.com/vi/omSYrjCtfD8/hqdefault.jpg",
+        "channel_title": "ABP Majha",
+    }),
+]
+
+_DEFAULT_FALLBACK_VIDEO: VideoResult = {
+    "video_id": "sjblf2STk7k",
+    "title": "India Today Live News | Top Breaking Headlines",
+    "thumbnail_url": "https://i.ytimg.com/vi/sjblf2STk7k/hqdefault.jpg",
+    "channel_title": "India Today",
+}
+
+
+def _fallback_video(query: str) -> VideoResult:
+    q = (query or "").lower()
+    for pat, item in _FALLBACK_NEWS_VIDEOS:
+        if pat.search(q):
+            return item
+    return _DEFAULT_FALLBACK_VIDEO
+
+
 async def _is_embed_playable(client: httpx.AsyncClient, video_id: str) -> bool:
     try:
         resp = await client.get(
             f"https://www.youtube.com/embed/{video_id}",
-            headers={"Referer": EMBED_REFERER},
-            timeout=3.5,
+            headers={"Referer": EMBED_REFERER, "User-Agent": "Mozilla/5.0"},
+            timeout=2.0,
         )
         if resp.status_code != 200:
             return False
@@ -76,8 +125,8 @@ async def search_news_video(query: str, language: str = "") -> Optional[VideoRes
     """Find the top relevant, embeddable YouTube video for query."""
     api_key = os.getenv("YOUTUBE_API_KEY", "")
     if not api_key:
-        logger.warning("YOUTUBE_API_KEY not set — cannot search YouTube")
-        return None
+        logger.warning("YOUTUBE_API_KEY not set — using verified news fallback")
+        return _fallback_video(query)
 
     clean_q = _clean_headline_for_search(query)
     if clean_q and "news" not in clean_q.lower() and len(clean_q) < 40:
@@ -122,24 +171,31 @@ async def search_news_video(query: str, language: str = "") -> Optional[VideoRes
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(YOUTUBE_SEARCH_URL, params=params)
             if resp.status_code != 200:
-                logger.warning("YouTube API returned %s: %s", resp.status_code, resp.text[:200])
+                logger.warning("YouTube API returned %s: %s — using verified news fallback", resp.status_code, resp.text[:200])
+                fb = _fallback_video(clean_q)
                 if not fut.done():
-                    fut.set_result(None)
-                return None
+                    fut.set_result(fb)
+                return fb
             payload: dict[str, Any] = resp.json()
             items = payload.get("items") or []
             if not items:
+                fb = _fallback_video(clean_q)
                 if not fut.done():
-                    fut.set_result(None)
-                return None
+                    fut.set_result(fb)
+                return fb
 
-            playable_items: list[dict[str, Any]] = []
-            for item in items:
-                vid = (item.get("id") or {}).get("videoId")
-                if not vid:
-                    continue
-                if await _is_embed_playable(client, str(vid)):
-                    playable_items.append(item)
+            async def _check_item(it: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+                v = (it.get("id") or {}).get("videoId")
+                if not v:
+                    return it, False
+                ok = await _is_embed_playable(client, str(v))
+                return it, ok
+
+            top_candidates = items[:4]
+            checked = await asyncio.gather(*[_check_item(it) for it in top_candidates], return_exceptions=True)
+            playable_items: list[dict[str, Any]] = [
+                res[0] for res in checked if isinstance(res, tuple) and res[1]
+            ]
 
             if not playable_items:
                 chosen = items[0]
@@ -180,10 +236,11 @@ async def search_news_video(query: str, language: str = "") -> Optional[VideoRes
             fut.set_result(res)
         return res
     except (httpx.RequestError, httpx.HTTPError, ValueError) as exc:
-        logger.exception("YouTube API request failed")
+        logger.exception("YouTube API request failed — using verified news fallback")
+        fb = _fallback_video(query)
         if not fut.done():
-            fut.set_result(None)
-        return None
+            fut.set_result(fb)
+        return fb
     finally:
         if _VIDEO_INFLIGHT.get(cache_key) is fut:
             _VIDEO_INFLIGHT.pop(cache_key, None)

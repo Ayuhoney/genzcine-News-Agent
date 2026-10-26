@@ -38,7 +38,7 @@ from .services.user_service import (
     save_participant_name,
 )
 
-TRIAL_SECONDS = 600  # 10-minute free trial
+TRIAL_SECONDS = int(os.getenv("TRIAL_SECONDS", "-1"))  # -1 = unlimited by default, or set N seconds
 
 logger = logging.getLogger("api")
 

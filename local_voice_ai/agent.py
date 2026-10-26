@@ -1150,6 +1150,7 @@ class Assistant(Agent):
         self._silence_filler_spoken = True
         self._filler_speaking = False
         search_topic = self._resolve_video_topic(topic)
+        logger.info("starting news video search: raw=%r -> resolved=%r", topic, search_topic)
         if self._video_playing and (time.monotonic() - self._last_video_start_at) < 8.0:
             return "The video is already playing on the viewer's screen — stay quiet until it ends."
 
